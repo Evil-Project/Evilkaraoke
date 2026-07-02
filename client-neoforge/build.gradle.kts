@@ -2,6 +2,10 @@ plugins {
     alias(libs.plugins.neoforge.moddev)
 }
 
+tasks.withType<Jar>().configureEach {
+    archiveBaseName.set("Evilkaraoke-NeoForge")
+}
+
 neoForge {
     version = "26.2.0.7-beta"
 
@@ -33,4 +37,12 @@ dependencies {
     jarJar(libs.soundlibs.tritonus)
     jarJar(libs.soundlibs.jlayer)
     jarJar(libs.vorbis.java.core)
+}
+
+tasks.processResources {
+    val props = mapOf("version" to project.version)
+    inputs.properties(props)
+    filesMatching("META-INF/neoforge.mods.toml") {
+        expand(props)
+    }
 }

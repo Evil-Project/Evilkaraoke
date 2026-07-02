@@ -6,6 +6,9 @@ on:
       - main
       - master
   pull_request:
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
@@ -30,17 +33,57 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Resolve release version
+        id: release-version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Build and test
-        run: ./gradlew build --no-daemon --stacktrace
+        env:
+          RELEASE_VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          if [ -n "$RELEASE_VERSION" ]; then
+            ./gradlew clean build --no-daemon --stacktrace -PreleaseVersion="$RELEASE_VERSION"
+          else
+            ./gradlew clean build --no-daemon --stacktrace
+          fi
 
       - name: Upload plugin and mod jars
         uses: actions/upload-artifact@v4
         with:
-          name: evilkaraoke-jars
+          name: Evilkaraoke
           if-no-files-found: error
           path: |
-            server-paper/build/libs/server-paper-*.jar
-            client-fabric/build/libs/client-fabric-*.jar
-            client-neoforge/build/libs/client-neoforge-*.jar
+            server-paper/build/libs/Evilkaraoke-Paper-*.jar
+            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
+            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
             !**/*-sources.jar
             !**/*-javadoc.jar
+
+      - name: Publish to Modrinth
+        if: github.event_name == 'release'
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_PROJECT_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+
+          files: |
+            server-paper/build/libs/Evilkaraoke-Paper-*.jar
+            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
+            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
+            !**/*-sources.jar
+            !**/*-javadoc.jar
+
+          loaders: |
+            paper
+            fabric
+            neoforge
+          game-versions: |
+            26.2
+          java: |
+            25
+          version: ${{ steps.release-version.outputs.version }}
+          version-type: ${{ github.event.release.prerelease && 'beta' || 'release' }}

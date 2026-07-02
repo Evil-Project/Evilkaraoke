@@ -2,9 +2,11 @@ plugins {
     `java-library`
 }
 
+val projectVersion = providers.gradleProperty("releaseVersion").orElse("0.1.0-SNAPSHOT")
+
 allprojects {
     group = "org.evilproject"
-    version = "0.1.0-SNAPSHOT"
+    version = projectVersion.get()
 }
 
 subprojects {

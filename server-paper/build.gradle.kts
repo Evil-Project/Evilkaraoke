@@ -4,6 +4,10 @@ plugins {
     alias(libs.plugins.run.paper)
 }
 
+tasks.withType<Jar>().configureEach {
+    archiveBaseName.set("Evilkaraoke-Paper")
+}
+
 dependencies {
     api(project(":common"))
     compileOnly(libs.paper.api)
@@ -19,6 +23,14 @@ tasks.shadowJar {
 
 tasks.build {
     dependsOn(tasks.shadowJar)
+}
+
+tasks.processResources {
+    val props = mapOf("version" to project.version)
+    inputs.properties(props)
+    filesMatching("plugin.yml") {
+        expand(props)
+    }
 }
 
 tasks.runServer {

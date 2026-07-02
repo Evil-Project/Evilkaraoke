@@ -2,6 +2,10 @@ plugins {
     alias(libs.plugins.fabric.loom)
 }
 
+tasks.withType<Jar>().configureEach {
+    archiveBaseName.set("Evilkaraoke-Fabric")
+}
+
 dependencies {
     minecraft("com.mojang:minecraft:${libs.versions.minecraft.get()}")
     implementation(libs.fabric.loader)
