@@ -1,28 +1,44 @@
 [versions]
-java = "21"
+java = "25"
 junit = "5.13.4"
 gson = "2.13.1"
 slf4j = "2.0.17"
-paper-api = "1.21.11-R0.1-SNAPSHOT"
-minecraft = "1.21.11"
+jse-spi = "1.1.0"
+soundlibs-mp3spi = "1.9.5.4"
+soundlibs-tritonus = "0.3.7.4"
+soundlibs-jlayer = "1.0.1.4"
+vorbis-java = "0.8"
+paper-api = "26.2.build.40-alpha"
+minecraft = "26.2"
 fabric-loader = "0.19.3"
-fabric-api = "0.141.4+1.21.11"
-yarn-mappings = "1.21.11+build.6"
-fabric-loom = "1.13-SNAPSHOT"
-neoforge = "21.11.42"
+fabric-api = "0.152.2+26.2"
+yarn-mappings = "26.2+build.1"
+fabric-loom = "1.17-SNAPSHOT"
+neoforge = "26.2.0.7-beta"
 neoforge-moddev = "2.0.141"
 shadow = "9.0.2"
+run-paper = "3.0.2"
+luckperms = "5.4"
 
 [libraries]
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+jse-spi-opus = { module = "io.github.jseproject:jse-spi-opus", version.ref = "jse-spi" }
+jse-spi-vorbis = { module = "io.github.jseproject:jse-spi-vorbis", version.ref = "jse-spi" }
+jse-api = { module = "io.github.jseproject:jse-api", version.ref = "jse-spi" }
+soundlibs-mp3spi = { module = "com.googlecode.soundlibs:mp3spi", version.ref = "soundlibs-mp3spi" }
+soundlibs-tritonus = { module = "com.googlecode.soundlibs:tritonus-share", version.ref = "soundlibs-tritonus" }
+soundlibs-jlayer = { module = "com.googlecode.soundlibs:jlayer", version.ref = "soundlibs-jlayer" }
+vorbis-java-core = { module = "org.gagravarr:vorbis-java-core", version.ref = "vorbis-java" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper-api" }
+luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms" }
 fabric-loader = { module = "net.fabricmc:fabric-loader", version.ref = "fabric-loader" }
 fabric-api = { module = "net.fabricmc.fabric-api:fabric-api", version.ref = "fabric-api" }
 
 [plugins]
-fabric-loom = { id = "fabric-loom", version.ref = "fabric-loom" }
+fabric-loom = { id = "net.fabricmc.fabric-loom", version.ref = "fabric-loom" }
 neoforge-moddev = { id = "net.neoforged.moddev", version.ref = "neoforge-moddev" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
+run-paper = { id = "xyz.jpenilla.run-paper", version.ref = "run-paper" }

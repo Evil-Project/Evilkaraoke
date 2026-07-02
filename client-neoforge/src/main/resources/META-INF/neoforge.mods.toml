@@ -12,13 +12,13 @@ authors="Evil-Project"
 [[dependencies.evilkaraoke]]
 modId="neoforge"
 type="required"
-versionRange="[21.11,)"
+versionRange="[26.2,)"
 ordering="NONE"
 side="CLIENT"
 
 [[dependencies.evilkaraoke]]
 modId="minecraft"
 type="required"
-versionRange="[1.21.11,1.22)"
+versionRange="[26.2,26.3)"
 ordering="NONE"
 side="CLIENT"

@@ -1,10 +1,11 @@
 name: Evilkaraoke
 version: ${version}
 main: org.evilproject.evilkaraoke.paper.EvilkaraokePlugin
-api-version: '1.21'
+api-version: '26.2'
 description: Server-authoritative Neurokaraoke playback for Minecraft clients.
 author: Evil-Project
 website: https://github.com/Evil-Project/Evilkaraoke
+softdepend: [LuckPerms]
 commands:
   evilkaraoke:
     description: Control Evilkaraoke playback.

@@ -3,12 +3,34 @@ plugins {
 }
 
 neoForge {
-    version = "21.11.42"
+    version = "26.2.0.7-beta"
+
+    runs {
+        create("client") {
+            client()
+            jvmArgument("--sun-misc-unsafe-memory-access=allow")
+        }
+    }
 }
 
 dependencies {
+    implementation(libs.jse.spi.opus)
+    implementation(libs.jse.spi.vorbis)
+    implementation(libs.jse.api)
+    implementation(libs.soundlibs.mp3spi)
+    implementation(libs.soundlibs.tritonus)
+    implementation(libs.soundlibs.jlayer)
+    implementation(libs.vorbis.java.core)
+
     implementation(project(":common"))
     implementation(project(":client-common"))
     jarJar(project(":common"))
     jarJar(project(":client-common"))
+    jarJar(libs.jse.spi.opus)
+    jarJar(libs.jse.spi.vorbis)
+    jarJar(libs.jse.api)
+    jarJar(libs.soundlibs.mp3spi)
+    jarJar(libs.soundlibs.tritonus)
+    jarJar(libs.soundlibs.jlayer)
+    jarJar(libs.vorbis.java.core)
 }

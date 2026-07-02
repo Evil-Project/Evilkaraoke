@@ -4,16 +4,39 @@ plugins {
 
 dependencies {
     minecraft("com.mojang:minecraft:${libs.versions.minecraft.get()}")
-    mappings(loom.officialMojangMappings())
-    modImplementation(libs.fabric.loader)
-
-    // Only the networking module is needed for custom payloads; pulling the whole
-    // fabric-api bundle clashes with Mojang mappings (fabric-content-registries-v0
-    // javadoc namespace), so we request just this module at the matching version.
-    modImplementation(fabricApi.module("fabric-networking-api-v1", libs.versions.fabric.api.get()))
+    implementation(libs.fabric.loader)
+    implementation(libs.fabric.api)
+    implementation(libs.jse.spi.opus)
+    implementation(libs.jse.spi.vorbis)
+    implementation(libs.jse.api)
+    implementation(libs.soundlibs.mp3spi)
+    implementation(libs.soundlibs.tritonus)
+    implementation(libs.soundlibs.jlayer)
+    implementation(libs.vorbis.java.core)
 
     implementation(project(":common"))
     implementation(project(":client-common"))
     include(project(":common"))
     include(project(":client-common"))
+    include(libs.jse.spi.opus)
+    include(libs.jse.spi.vorbis)
+    include(libs.jse.api)
+    include(libs.soundlibs.mp3spi)
+    include(libs.soundlibs.tritonus)
+    include(libs.soundlibs.jlayer)
+    include(libs.vorbis.java.core)
+}
+
+loom {
+    runs.configureEach {
+        jvmArguments.add("--sun-misc-unsafe-memory-access=allow")
+    }
+}
+
+tasks.processResources {
+    val props = mapOf("version" to project.version)
+    inputs.properties(props)
+    filesMatching("fabric.mod.json") {
+        expand(props)
+    }
 }
