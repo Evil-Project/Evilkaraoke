@@ -1,0 +1,5 @@
+prefix: "<gold>[Evilkaraoke]</gold> "
+missingPermission: "<red>You do not have permission to use that Evilkaraoke command.</red>"
+playerOnly: "<red>That command must be run by a player.</red>"
+unknownCommand: "<red>Unknown Evilkaraoke subcommand. Try <yellow>/ek help</yellow>.</red>"
+clientRequired: "<yellow>Install the Evilkaraoke client mod to hear playback.</yellow>"

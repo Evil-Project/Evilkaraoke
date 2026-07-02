@@ -1,0 +1,248 @@
+package org.evilproject.evilkaraoke.client.audio;
+
+import java.io.BufferedInputStream;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioInputStream;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.DataLine;
+import javax.sound.sampled.FloatControl;
+import javax.sound.sampled.SourceDataLine;
+
+import org.evilproject.evilkaraoke.common.model.AudioAsset;
+import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
+import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
+
+/**
+ * Loader-neutral audio backend. Decodes the server-provided asset URL through
+ * {@link AudioSystem} (using whatever decode SPIs are bundled) into 48 kHz
+ * signed-16 stereo PCM and plays it on a {@link SourceDataLine}. All queue,
+ * search, and control logic lives on the server; this class only turns an
+ * {@link AudioCommandPacket} into local sound, mirroring how a client reacts to
+ * {@code /playsound}.
+ */
+public final class JavaSoundAudioBackend implements AudioBackend {
+    private static final AudioFormat TARGET_FORMAT = new AudioFormat(
+            AudioFormat.Encoding.PCM_SIGNED,
+            PcmFormat.SAMPLE_RATE,
+            PcmFormat.BITS_PER_SAMPLE,
+            PcmFormat.CHANNELS,
+            PcmFormat.BYTES_PER_FRAME,
+            PcmFormat.SAMPLE_RATE,
+            false);
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
+    private final AtomicReference<PlaybackHandle> current = new AtomicReference<>();
+    private volatile AudioBackendStatus status = AudioBackendStatus.ready();
+    private volatile float gain = 1.0f;
+
+    @Override
+    public void play(AudioCommandPacket packet) {
+        stopCurrent();
+        KaraokeTrack track = packet.track();
+        if (track == null) {
+            status = AudioBackendStatus.error("PLAY packet had no track");
+            return;
+        }
+        gain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
+        PlaybackHandle handle = new PlaybackHandle(packet.playbackId());
+        current.set(handle);
+        Thread thread = new Thread(() -> runPlayback(handle, track), "evilkaraoke-audio-" + packet.playbackId());
+        thread.setDaemon(true);
+        handle.thread = thread;
+        status = new AudioBackendStatus(ClientPlaybackState.BUFFERING, "Buffering " + track.title());
+        thread.start();
+    }
+
+    @Override
+    public void pause(AudioCommandPacket packet) {
+        PlaybackHandle handle = current.get();
+        if (handle != null) {
+            handle.paused = true;
+            SourceDataLine line = handle.line;
+            if (line != null) {
+                line.stop();
+            }
+            status = new AudioBackendStatus(ClientPlaybackState.PAUSED, "Paused");
+        }
+    }
+
+    @Override
+    public void resume(AudioCommandPacket packet) {
+        PlaybackHandle handle = current.get();
+        if (handle != null) {
+            handle.paused = false;
+            SourceDataLine line = handle.line;
+            if (line != null) {
+                line.start();
+            }
+            status = new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+        }
+    }
+
+    @Override
+    public void stop(AudioCommandPacket packet) {
+        stopCurrent();
+        status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Stopped");
+    }
+
+    @Override
+    public AudioBackendStatus status() {
+        return status;
+    }
+
+    /** Applies a new linear gain (0..1), e.g. from a VOLUME packet or listener move. */
+    @Override
+    public void setVolume(float newGain) {
+        this.gain = clamp01(newGain);
+        PlaybackHandle handle = current.get();
+        if (handle != null) {
+            applyGain(handle.line, this.gain);
+        }
+    }
+
+    private void runPlayback(PlaybackHandle handle, KaraokeTrack track) {
+        Exception primaryError = tryPlayAsset(handle, track.primaryAsset());
+        if (primaryError == null || handle.stopped) {
+            return;
+        }
+        AudioAsset fallback = track.fallbackAsset();
+        if (fallback != null) {
+            Exception fallbackError = tryPlayAsset(handle, fallback);
+            if (fallbackError == null || handle.stopped) {
+                return;
+            }
+            status = AudioBackendStatus.error("Could not decode " + track.title() + ": " + fallbackError.getMessage());
+            return;
+        }
+        status = AudioBackendStatus.error("Could not decode " + track.title() + ": " + primaryError.getMessage());
+    }
+
+    private Exception tryPlayAsset(PlaybackHandle handle, AudioAsset asset) {
+        if (asset == null) {
+            return new IllegalStateException("no asset");
+        }
+        try (InputStream network = openStream(asset.url());
+             AudioInputStream encoded = AudioSystem.getAudioInputStream(new BufferedInputStream(network));
+             AudioInputStream pcm = AudioSystem.getAudioInputStream(TARGET_FORMAT, encoded)) {
+            SourceDataLine line = openLine();
+            handle.line = line;
+            applyGain(line, gain);
+            line.start();
+            status = new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+            pump(handle, pcm, line);
+            drainAndClose(handle, line);
+            if (!handle.stopped) {
+                status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+            }
+            return null;
+        } catch (Exception ex) {
+            return ex;
+        }
+    }
+
+    private void pump(PlaybackHandle handle, AudioInputStream pcm, SourceDataLine line) throws Exception {
+        byte[] buffer = new byte[8_192];
+        int read;
+        while (!handle.stopped && (read = pcm.read(buffer)) != -1) {
+            while (handle.paused && !handle.stopped) {
+                Thread.sleep(50);
+            }
+            if (handle.stopped) {
+                return;
+            }
+            int offset = 0;
+            while (offset < read && !handle.stopped) {
+                offset += line.write(buffer, offset, read - offset);
+            }
+        }
+    }
+
+    private void drainAndClose(PlaybackHandle handle, SourceDataLine line) {
+        try {
+            if (!handle.stopped) {
+                line.drain();
+            }
+        } finally {
+            line.stop();
+            line.close();
+        }
+    }
+
+    private InputStream openStream(String url) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .header("User-Agent", "Evilkaraoke-Client")
+                .GET()
+                .build();
+        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            response.body().close();
+            throw new IllegalStateException("HTTP " + response.statusCode() + " for " + url);
+        }
+        return response.body();
+    }
+
+    private SourceDataLine openLine() throws Exception {
+        DataLine.Info info = new DataLine.Info(SourceDataLine.class, TARGET_FORMAT);
+        SourceDataLine line = (SourceDataLine) AudioSystem.getLine(info);
+        line.open(TARGET_FORMAT);
+        return line;
+    }
+
+    private void stopCurrent() {
+        PlaybackHandle handle = current.getAndSet(null);
+        if (handle != null) {
+            handle.stopped = true;
+            SourceDataLine line = handle.line;
+            if (line != null) {
+                line.stop();
+                line.close();
+            }
+            if (handle.thread != null) {
+                handle.thread.interrupt();
+            }
+        }
+    }
+
+    private static void applyGain(SourceDataLine line, float linearGain) {
+        if (line == null) {
+            return;
+        }
+        if (line.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
+            FloatControl control = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
+            float clamped = clamp01(linearGain);
+            float decibels = clamped <= 0.0001f ? control.getMinimum() : (float) (20.0 * Math.log10(clamped));
+            control.setValue(Math.max(control.getMinimum(), Math.min(control.getMaximum(), decibels)));
+        }
+    }
+
+    private static float clamp01(float value) {
+        if (value < 0.0f) {
+            return 0.0f;
+        }
+        return Math.min(value, 1.0f);
+    }
+
+    private static final class PlaybackHandle {
+        private final String playbackId;
+        private volatile Thread thread;
+        private volatile SourceDataLine line;
+        private volatile boolean paused;
+        private volatile boolean stopped;
+
+        private PlaybackHandle(String playbackId) {
+            this.playbackId = playbackId;
+        }
+    }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "evilkaraoke",
+  "version": "${version}",
+  "name": "Evilkaraoke",
+  "description": "Client-side Evilkaraoke audio playback for server-authoritative karaoke sessions.",
+  "authors": ["Evil-Project"],
+  "license": "Apache-2.0",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "org.evilproject.evilkaraoke.fabric.EvilkaraokeFabricClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~1.21.11",
+    "fabric-api": "*"
+  }
+}

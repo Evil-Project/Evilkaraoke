@@ -1,0 +1,41 @@
+name: Evilkaraoke
+version: ${version}
+main: org.evilproject.evilkaraoke.paper.EvilkaraokePlugin
+api-version: '1.21'
+description: Server-authoritative Neurokaraoke playback for Minecraft clients.
+author: Evil-Project
+website: https://github.com/Evil-Project/Evilkaraoke
+commands:
+  evilkaraoke:
+    description: Control Evilkaraoke playback.
+    usage: /<command> help
+    aliases: [ek]
+permissions:
+  evilkaraoke.command.help:
+    default: true
+  evilkaraoke.command.search:
+    default: true
+  evilkaraoke.command.request:
+    default: true
+  evilkaraoke.command.queue:
+    default: true
+  evilkaraoke.command.current:
+    default: true
+  evilkaraoke.command.stats:
+    default: true
+  evilkaraoke.command.radio:
+    default: true
+  evilkaraoke.playback.pause:
+    default: op
+  evilkaraoke.playback.resume:
+    default: op
+  evilkaraoke.playback.skip:
+    default: op
+  evilkaraoke.playback.stop:
+    default: op
+  evilkaraoke.playback.audience:
+    default: op
+  evilkaraoke.admin.reload:
+    default: op
+  evilkaraoke.admin.doctor:
+    default: op

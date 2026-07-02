@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="Apache-2.0"
+
+[[mods]]
+modId="evilkaraoke"
+version="${version}"
+displayName="Evilkaraoke"
+description='''Client-side Evilkaraoke audio playback for server-authoritative karaoke sessions.'''
+authors="Evil-Project"
+
+[[dependencies.evilkaraoke]]
+modId="neoforge"
+type="required"
+versionRange="[21.11,)"
+ordering="NONE"
+side="CLIENT"
+
+[[dependencies.evilkaraoke]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.11,1.22)"
+ordering="NONE"
+side="CLIENT"
