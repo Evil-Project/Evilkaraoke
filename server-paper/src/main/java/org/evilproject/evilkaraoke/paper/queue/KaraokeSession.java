@@ -9,7 +9,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
+import org.bukkit.entity.Player;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.model.PlaybackState;
 
@@ -22,6 +24,7 @@ public final class KaraokeSession {
     private QueuedTrack current;
     private Instant startedAt;
     private Duration pausedOffset = Duration.ZERO;
+    private float volume = 1.0f;
 
     public synchronized void request(KaraokeTrack track, UUID requester, String requesterName) {
         requests.add(new QueuedTrack(track, requester, requesterName, Instant.now()));
@@ -72,6 +75,17 @@ public final class KaraokeSession {
         state = PlaybackState.IDLE;
     }
 
+    public synchronized boolean skip() {
+        if (current != null) {
+            current = null;
+            startedAt = null;
+            pausedOffset = Duration.ZERO;
+            state = PlaybackState.IDLE;
+            return true;
+        }
+        return false;
+    }
+
     public synchronized PlaybackSnapshot snapshot() {
         return new PlaybackSnapshot(state, current, List.copyOf(requests), List.copyOf(randomTracks), offset());
     }
@@ -94,10 +108,26 @@ public final class KaraokeSession {
         return randomTracks.size();
     }
 
+    public synchronized int requestQueueSize() {
+        return requests.size();
+    }
+
     public synchronized List<QueuedTrack> queuedTracks() {
         List<QueuedTrack> all = new ArrayList<>(requests);
         all.addAll(randomTracks);
         return all;
+    }
+
+    public synchronized PlaybackState state() {
+        return state;
+    }
+
+    public synchronized float getVolume() {
+        return volume;
+    }
+
+    public synchronized void setVolume(float volume) {
+        this.volume = Math.max(0.0f, Math.min(2.0f, volume));
     }
 
     public record QueuedTrack(KaraokeTrack track, UUID requester, String requesterName, Instant queuedAt) {
