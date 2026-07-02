@@ -16,3 +16,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Dev server run directories (generated world data, configs, caches)
+run/
+
+# IDE run configurations
+.run/
