@@ -8,6 +8,7 @@ import org.evilproject.evilkaraoke.client.audio.AudioBackendStatus;
 import org.evilproject.evilkaraoke.client.audio.JavaSoundAudioBackend;
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
+import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
@@ -26,6 +27,8 @@ public final class ClientAudioController {
     private final String modVersion;
     private final String minecraftVersion;
     private final String loader;
+    /** Optional hook called on the game thread when a PLAY command is dispatched. */
+    private Consumer<KaraokeTrack> onPlayCallback;
 
     public ClientAudioController(Logger logger, String modVersion, String minecraftVersion, String loader) {
         this(logger, new JavaSoundAudioBackend(), modVersion, minecraftVersion, loader);
@@ -37,6 +40,23 @@ public final class ClientAudioController {
         this.modVersion = modVersion;
         this.minecraftVersion = minecraftVersion;
         this.loader = loader;
+    }
+
+    /**
+     * Sets a callback invoked (on the game thread) whenever a PLAY command is
+     * dispatched. Loader modules use this to show a music toast without pulling
+     * Minecraft API into client-common. Pass {@code null} to clear.
+     */
+    public void setOnPlay(Consumer<KaraokeTrack> callback) {
+        this.onPlayCallback = callback;
+    }
+
+    /**
+     * Stops all active playback immediately. Call this when the client disconnects
+     * from a server so the audio thread does not outlive the play session.
+     */
+    public void stopAll() {
+        backend.stop(null);
     }
 
     /** @return the handshake bytes to send on the hello channel when joining a server. */
@@ -71,7 +91,12 @@ public final class ClientAudioController {
     private void dispatch(AudioCommandPacket command) {
         AudioCommandType type = command.command();
         switch (type) {
-            case PLAY -> backend.play(command);
+            case PLAY -> {
+                backend.play(command);
+                if (onPlayCallback != null && command.track() != null) {
+                    onPlayCallback.accept(command.track());
+                }
+            }
             case PAUSE -> backend.pause(command);
             case RESUME -> backend.resume(command);
             case STOP -> backend.stop(command);

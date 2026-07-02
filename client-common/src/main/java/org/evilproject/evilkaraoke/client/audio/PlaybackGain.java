@@ -24,8 +24,14 @@ public final class PlaybackGain {
     public static float forListener(PlaybackTarget target, ListenerPosition listener) {
         float base = clamp01(target.volume());
         Position source = target.position();
-        if (source == null || listener == null || !listener.worldKey().equals(source.worldKey())) {
-            return source == null ? base : clamp01(target.minVolume());
+        if (source == null) {
+            // Positionless broadcast — full base volume everywhere.
+            return base;
+        }
+        if (listener == null || !listener.worldKey().equals(source.worldKey())) {
+            // Position given but listener location unknown or in another dimension:
+            // floor at minVolume rather than silencing entirely.
+            return clamp01(target.minVolume());
         }
         double dx = listener.x() - source.x();
         double dy = listener.y() - source.y();

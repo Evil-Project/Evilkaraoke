@@ -38,7 +38,7 @@ class ClientAudioControllerTest {
     @Test
     void routesEachCommandToBackend() {
         RecordingBackend backend = new RecordingBackend();
-        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "1.21.11", "test");
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
 
         controller.handleAudioPayload(codec.encode(packet(AudioCommandType.PLAY)));
         controller.handleAudioPayload(codec.encode(packet(AudioCommandType.PAUSE)));
@@ -51,7 +51,7 @@ class ClientAudioControllerTest {
 
     @Test
     void helloPayloadRoundTrips() {
-        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), new RecordingBackend(), "0.1.0", "1.21.11", "test");
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), new RecordingBackend(), "0.1.0", "26.2", "test");
         assertNotNull(codec.decode(controller.helloPayload()));
     }
 

@@ -3,6 +3,8 @@ package org.evilproject.evilkaraoke.neoforge;
 import java.util.logging.Logger;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.toasts.SystemToast;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -14,6 +16,7 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 import org.evilproject.evilkaraoke.client.net.ClientAudioController;
+import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
 
 /**
@@ -35,8 +38,15 @@ public final class EvilkaraokeNeoForgeClient {
     public EvilkaraokeNeoForgeClient(IEventBus modBus, ModContainer container) {
         modBus.addListener(this::registerPayloads);
         NeoForge.EVENT_BUS.addListener(this::onLogin);
+        // Stop audio when the player disconnects from a server.
+        NeoForge.EVENT_BUS.addListener(this::onLogout);
+
         String minecraftVersion = container.getModInfo().getVersion().toString();
         controller = new ClientAudioController(LOGGER, MOD_VERSION, minecraftVersion, "neoforge");
+
+        // Show the vanilla music toast whenever a karaoke track starts playing.
+        controller.setOnPlay(this::showMusicToast);
+
         LOGGER.info("Evilkaraoke NeoForge client constructed (audio-only).");
     }
 
@@ -59,5 +69,30 @@ public final class EvilkaraokeNeoForgeClient {
             Minecraft.getInstance().getConnection().send(new ServerboundCustomPayloadPacket(payload));
             LOGGER.info("Sent Evilkaraoke hello handshake to server.");
         }
+    }
+
+    private void onLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        // Stop any active playback so the audio thread does not outlive the
+        // play session when the player disconnects or quits to the main menu.
+        controller.stopAll();
+        LOGGER.info("Evilkaraoke stopped playback on server disconnect.");
+    }
+
+    /**
+     * Surfaces the playing track as the vanilla music toast so players see the
+     * same "now playing" notification they get from jukeboxes.
+     */
+    private void showMusicToast(KaraokeTrack track) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null) {
+            return;
+        }
+        Component title = Component.literal(track.title());
+        Component artist = Component.literal(track.artist());
+        mc.execute(() -> SystemToast.add(
+                mc.gui.toastManager(),
+                SystemToast.SystemToastId.PERIODIC_NOTIFICATION,
+                title,
+                artist));
     }
 }
