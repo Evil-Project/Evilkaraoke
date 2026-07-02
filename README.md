@@ -4,47 +4,81 @@ A Minecraft karaoke system for Paper servers with Fabric and NeoForge client mod
 
 ## Features
 
-- **Server-authoritative queue management** — all command logic runs on Paper
-- **Client-only audio playback** — mods stream audio from HTTP sources via JavaSound
-- **Distance-based spatial audio** — volume attenuates based on player position and world
-- **Multi-loader support** — Fabric and NeoForge clients on the same server
-- **Audience targeting** — play for all players, specific players, or yourself (like `/playsound`)
-- **Radio mode** — continuous random playback from configured stations
-- **Statistics tracking** — song plays, user requests, leaderboards
-- **Plug-and-play** — drop jars in `plugins/` and `mods/`, configure API endpoint, ready to use
+- Server-authoritative queue management — all command logic runs on Paper
+- Client-only audio playback — mods stream audio from HTTP sources via JavaSound
+- Distance-based spatial audio — volume attenuates based on player position and world
+- Multi-loader support — Fabric and NeoForge clients on the same server
+- Audience targeting — play for all players, specific players, or yourself (like `/playsound`)
+- Radio mode — continuous random playback from configured stations
+- Statistics tracking — song plays, user requests, leaderboards
+- Plug-and-play — drop jars in `plugins/` and `mods/`, configure API endpoint, ready to use
 
 ## Requirements
 
-- **Server**: Paper 1.21.11+ (Java 21)
-- **Client**: Minecraft 1.21.11 + Fabric Loader 0.19.3+ **or** NeoForge 21.11.42+
+- **Server**: Paper 26.2+ (Java 25)
+- **Client**: Minecraft 26.2 + Fabric Loader 0.19.3+ **or** NeoForge 26.2.0.7-beta+
 - **API**: Neurokaraoke-compatible API endpoint (configure in `config.yml`)
+
+## Quick Start
+
+```bash
+# Build the plugin and mods
+./gradlew build
+
+# Server: copy plugin to your Paper server
+cp server-paper/build/libs/server-paper-0.1.0-SNAPSHOT.jar /path/to/server/plugins/
+
+# Client: copy mod to your Minecraft instance (pick one)
+cp client-fabric/build/libs/client-fabric-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
+cp client-neoforge/build/libs/client-neoforge-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
+```
+
+Start the server — `config.yml` and `messages.yml` are generated in `plugins/Evilkaraoke/`. Edit the API endpoints, then run `/ek reload`.
+
+```
+/ek help                    # Show all commands
+/ek search Caramelldansen   # Search for a song
+/ek request Caramelldansen  # Queue and play
+/ek current                 # What's playing?
+/ek queue                   # What's up next?
+/ek pause                   # Pause (ops only)
+/ek resume                  # Resume (ops only)
+/ek skip                    # Skip to next (ops only)
+```
 
 ## Installation
 
 ### Server
 
-1. Download Paper 1.21.11+ from [papermc.io](https://papermc.io/downloads/paper)
+1. Download Paper 26.2+ from [papermc.io](https://papermc.io/downloads/paper)
 2. Place `server-paper-0.1.0-SNAPSHOT.jar` in your `plugins/` directory
 3. Start the server — `config.yml` and `messages.yml` are generated in `plugins/Evilkaraoke/`
-4. Configure your Neurokaraoke API endpoint in `config.yml`:
-   ```yaml
-   neurokaraoke:
-     base-url: "https://your-api.example.com"
-     api-key: "your-key-here"
-   ```
-5. Reload the plugin: `/evilkaraoke reload`
+4. Configure your Neurokaraoke API endpoints in `config.yml` (see [Configuration](#configuration))
+5. Reload the plugin: `/ek reload`
 
 ### Client (Fabric)
 
-1. Install Fabric Loader 0.19.3+ for Minecraft 1.21.11
+1. Install Fabric Loader 0.19.3+ for Minecraft 26.2
 2. Place `client-fabric-0.1.0-SNAPSHOT.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running Evilkaraoke
 
 ### Client (NeoForge)
 
-1. Install NeoForge 21.11.42+ for Minecraft 1.21.11
+1. Install NeoForge 26.2.0.7-beta+ for Minecraft 26.2
 2. Place `client-neoforge-0.1.0-SNAPSHOT.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running Evilkaraoke
+
+### Testing Without an API
+
+The plugin loads and most commands work even without a real API endpoint:
+
+1. Start the server with the plugin installed
+2. Check console for: `Evilkaraoke enabled with server-authoritative playback coordination.`
+3. Run `/ek help` — should show the command list
+4. Run `/ek doctor` — shows diagnostic info
+5. Run `/ek listeners` — shows connected clients (requires client mod)
+
+Commands requiring the API (`request`, `search`, `randomsong`) will fail gracefully with error messages.
 
 ## Commands
 
@@ -116,11 +150,11 @@ evilkaraoke.admin.doctor: op             # Diagnostics
 
 ### Modules
 
-- **common** — Shared protocol (packets, models, codec) - Java 21
-- **server-paper** — Paper plugin (commands, queue, API client, stats) - Paper 1.21.11
-- **client-common** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 21
-- **client-fabric** — Fabric mod entrypoint + custom payload networking - MC 1.21.11 + Fabric
-- **client-neoforge** — NeoForge mod entrypoint + custom payload networking - MC 1.21.11 + NeoForge 21.11.42
+- **common** — Shared protocol (packets, models, codec) - Java 25
+- **server-paper** — Paper plugin (commands, queue, API client, stats) - Paper 26.2
+- **client-common** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 25
+- **client-fabric** — Fabric mod entrypoint + custom payload networking - MC 26.2 + Fabric
+- **client-neoforge** — NeoForge mod entrypoint + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
 
 ### Protocol
 
@@ -148,54 +182,45 @@ Like `/playsound`, you can control who hears the audio:
 - **player** — Specific player by name
 - **Positional** — Audio source at coordinates with distance attenuation
 
-### Discord Bot Mapping
-
-| Discord Bot Command | Minecraft Command | Notes |
-|---------------------|-------------------|-------|
-| `/play <song>` | `/ek request <song>` | Queues song for playback |
-| `/pause` | `/ek pause` | Pauses current track |
-| `/resume` | `/ek resume` | Resumes paused track |
-| `/skip` | `/ek skip` | Skips to next track |
-| `/stop` | `/ek stop` | Stops and clears queue |
-| `/queue` | `/ek queue` | Shows upcoming tracks |
-| `/nowplaying` | `/ek current` | Shows current track |
-| `/search <query>` | `/ek search <query>` | Search without queueing |
-| `/join` / `/leave` | *(omitted)* | No voice channels in Minecraft |
-| *(N/A)* | `/ek audience <target>` | Minecraft-specific: control who hears audio |
-| *(N/A)* | `/ek radio <station>` | Continuous playback mode |
-
 ## Configuration
 
 ### config.yml
 
 ```yaml
-neurokaraoke:
-  base-url: "https://api.example.com"
-  api-key: "your-key-here"
-  timeout-seconds: 10
+api:
+  timeoutMillis: 8000
+  retries: 3
+  retryDelayMillis: 2000
+  randomUrl: "https://api.neurokaraoke.com/api/songs/random"
+  searchUrl: "https://api.neurokaraoke.com/api/songs"
+  songUrl: "https://api.neurokaraoke.com/api/songs/"
+  playlistUrl: "https://api.neurokaraoke.com/api/playlist/"
+  artistUrl: "https://api.neurokaraoke.com/api/artist/"
+  audioBaseUrl: "https://audio.neurokaraoke.com/"
+  imagesBaseUrl: "https://images.neurokaraoke.com"
 
 playback:
-  default-volume: 1.0
-  max-volume: 2.0
-  
-spatial-audio:
-  enabled: true
-  attenuation-distance: 64.0
-  min-volume: 0.1
+  defaultTargets: "@a"
+  defaultSource: "music"
+  defaultVolume: 1.0
+  defaultPitch: 1.0
+  defaultMinVolume: 0.0
+  randomCacheSize: 2
+  pauseBetweenSongsSeconds: 3
+  requireClientMod: true
+  allowRadio: true
 
-queue:
-  max-per-user: 5
-  max-total: 50
-  
-radio:
-  radio21:
-    enabled: true
-  swarmfm:
-    enabled: true
-    
 stats:
   enabled: true
-  save-interval-seconds: 300
+  countPlayAfterPercent: 75
+  saveIntervalSeconds: 60
+
+permissions:
+  defaultControlAllowed: false
+
+debug:
+  logPackets: false
+  logApiRequests: false
 ```
 
 ### messages.yml
@@ -217,7 +242,7 @@ Artifacts:
 
 ### Prerequisites
 
-- Java 21 (required for Minecraft 1.21.11)
+- Java 25 (required for Minecraft 26.2)
 - Gradle 9.0+
 
 ### Project Structure
@@ -233,18 +258,6 @@ Evilkaraoke/
 └── build.gradle.kts     # Root build configuration
 ```
 
-### Key Design Decisions
-
-1. **Server-authoritative** — All game logic, queue management, and API calls happen on Paper. Clients are audio-only.
-
-2. **JSON over custom payloads** — Simple, debuggable protocol. No Protobuf/binary complexity for this use case.
-
-3. **HTTP audio streaming** — Server sends URLs, clients fetch and decode. No raw audio over network channels.
-
-4. **Loader-neutral audio** — `client-common` has zero Minecraft dependencies. Pure JavaSound + Java 21 stdlib.
-
-5. **Distance attenuation** — Mirrors `/playsound` behavior: volume = max(minVolume, baseVolume * (1 - distance/maxDistance))
-
 ### Testing
 
 ```bash
@@ -259,6 +272,11 @@ Tests cover:
 - Spatial audio (distance attenuation, cross-world)
 
 ## Troubleshooting
+
+### "Command not found"
+
+- Plugin didn't load. Check the `plugins/` folder and server console for errors.
+- Run `/plugins` to see if Evilkaraoke is listed.
 
 ### "No Evilkaraoke clients connected"
 
@@ -276,10 +294,10 @@ Tests cover:
 
 ### "API request failed"
 
-- Verify `base-url` and `api-key` in `config.yml`
-- Test the API endpoint with curl/browser
+- Verify the API URLs in `config.yml`
+- Test the endpoint: `curl https://api.neurokaraoke.com/api/songs/random`
 - Check Paper console for error details
-- Increase `timeout-seconds` if requests are slow
+- Increase `api.timeoutMillis` if requests are slow
 
 ## License
 
@@ -288,4 +306,3 @@ MIT
 ## Credits
 
 - Ported from [neurokaraokebot](https://github.com/Mr-Auto/neurokaraokebot) by Mr-Auto
-- Built with Claude Code (Opus 4.8)

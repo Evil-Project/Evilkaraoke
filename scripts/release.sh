@@ -29,22 +29,20 @@ echo "✓ Release directory ready"
 echo "[3/5] Packaging server plugin..."
 cp server-paper/build/libs/server-paper-$VERSION.jar "$BUILD_DIR/server/Evilkaraoke-$VERSION.jar"
 cp README.md "$BUILD_DIR/server/"
-cp QUICKSTART.md "$BUILD_DIR/server/"
 cp server-paper/src/main/resources/config.yml "$BUILD_DIR/server/config-example.yml"
 cat > "$BUILD_DIR/server/README.txt" << EOF
 Evilkaraoke Server Plugin - Version $VERSION
 
 Installation:
-1. Copy Evilkaraoke-$VERSION.jar to your Paper 1.21.11 server's plugins/ folder
+1. Copy Evilkaraoke-$VERSION.jar to your Paper 26.2 server's plugins/ folder
 2. Start the server (generates default config)
 3. Edit plugins/Evilkaraoke/config.yml with your API endpoint
 4. Run /ek reload to apply changes
 
-See README.md for full documentation.
-See QUICKSTART.md for quick setup guide.
+See README.md for full documentation and quick start guide.
 
 Requirements:
-- Paper 1.21.11+ (Java 21)
+- Paper 26.2+ (Java 25)
 - Neurokaraoke-compatible API endpoint
 
 Commands:
@@ -65,12 +63,12 @@ cat > "$BUILD_DIR/client-fabric/README.txt" << EOF
 Evilkaraoke Fabric Client Mod - Version $VERSION
 
 Installation:
-1. Install Fabric Loader 0.19.3+ for Minecraft 1.21.11
+1. Install Fabric Loader 0.19.3+ for Minecraft 26.2
 2. Copy Evilkaraoke-Fabric-$VERSION.jar to your mods/ folder
 3. Launch Minecraft and join a server running Evilkaraoke
 
 Requirements:
-- Minecraft 1.21.11
+- Minecraft 26.2
 - Fabric Loader 0.19.3+
 
 This mod is audio-only - all game logic runs on the server.
@@ -87,13 +85,13 @@ cat > "$BUILD_DIR/client-neoforge/README.txt" << EOF
 Evilkaraoke NeoForge Client Mod - Version $VERSION
 
 Installation:
-1. Install NeoForge 21.11.42+ for Minecraft 1.21.11
+1. Install NeoForge 26.2.0.7-beta+ for Minecraft 26.2
 2. Copy Evilkaraoke-NeoForge-$VERSION.jar to your mods/ folder
 3. Launch Minecraft and join a server running Evilkaraoke
 
 Requirements:
-- Minecraft 1.21.11
-- NeoForge 21.11.42+
+- Minecraft 26.2
+- NeoForge 26.2.0.7-beta+
 
 This mod is audio-only - all game logic runs on the server.
 No configuration needed on the client side.
@@ -118,7 +116,7 @@ echo "Artifacts created in $BUILD_DIR:"
 echo ""
 echo "Server Plugin:"
 echo "  - Evilkaraoke-Server-$VERSION.tar.gz"
-echo "    (includes plugin JAR, README, QUICKSTART, config example)"
+echo "    (includes plugin JAR, README, config example)"
 echo ""
 echo "Client Mods:"
 echo "  - Evilkaraoke-Fabric-$VERSION.tar.gz"
