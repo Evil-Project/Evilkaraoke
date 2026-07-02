@@ -12,15 +12,19 @@ import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.jetbrains.annotations.NotNull;
 
+import org.evilproject.evilkaraoke.paper.playback.PlaybackCoordinator;
+
 public final class EvilkaraokeMessageListener implements PluginMessageListener {
     private final Plugin plugin;
     private final ClientRegistry clientRegistry;
     private final JsonPacketCodec codec;
+    private final PlaybackCoordinator coordinator;
 
-    public EvilkaraokeMessageListener(Plugin plugin, ClientRegistry clientRegistry, JsonPacketCodec codec) {
+    public EvilkaraokeMessageListener(Plugin plugin, ClientRegistry clientRegistry, JsonPacketCodec codec, PlaybackCoordinator coordinator) {
         this.plugin = plugin;
         this.clientRegistry = clientRegistry;
         this.codec = codec;
+        this.coordinator = coordinator;
     }
 
     @Override
@@ -34,6 +38,9 @@ public final class EvilkaraokeMessageListener implements PluginMessageListener {
             if (packet instanceof ClientHelloPacket hello) {
                 clientRegistry.register(player.getUniqueId(), hello);
                 plugin.getLogger().info("Registered Evilkaraoke client for " + player.getName() + " (" + hello.loader() + " " + hello.modVersion() + ")");
+                // Delay sync by 1 tick so the client's incoming channel is fully
+                // established before the PLAY packet arrives.
+                plugin.getServer().getScheduler().runTaskLater(plugin, () -> coordinator.syncPlayer(player), 1L);
             }
         } catch (PacketCodecException | IllegalArgumentException ex) {
             plugin.getLogger().log(Level.WARNING, "Ignoring invalid Evilkaraoke packet from " + player.getName(), ex);

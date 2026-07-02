@@ -13,6 +13,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.model.PlaybackState;
 import org.evilproject.evilkaraoke.common.model.PlaybackTarget;
 import org.evilproject.evilkaraoke.common.model.SoundCategory;
 import org.evilproject.evilkaraoke.common.model.TargetMode;
@@ -78,6 +79,20 @@ public final class PlaybackCoordinator {
         return CompletableFuture.completedFuture(null);
     }
 
+    public CompletableFuture<Integer> requestAll(List<KaraokeTrack> tracks, Player requester) {
+        if (tracks.isEmpty()) {
+            return CompletableFuture.completedFuture(0);
+        }
+        boolean shouldStart = session.current().isEmpty();
+        for (KaraokeTrack track : tracks) {
+            session.request(track, requester.getUniqueId(), requester.getName());
+        }
+        if (shouldStart) {
+            Bukkit.getScheduler().runTask(plugin, this::playNext);
+        }
+        return CompletableFuture.completedFuture(tracks.size());
+    }
+
     public void playNext() {
         session.next().ifPresentOrElse(queued -> {
             String playbackId = UUID.randomUUID().toString();
@@ -111,10 +126,56 @@ public final class PlaybackCoordinator {
         playNext();
     }
 
+    public void previous() {
+        session.previous().ifPresentOrElse(queued -> {
+            cancelAutoAdvance();
+            String playbackId = UUID.randomUUID().toString();
+            AudioCommandPacket packet = new AudioCommandPacket(
+                    AudioCommandType.PLAY,
+                    KaraokeSession.GLOBAL_SESSION_ID,
+                    playbackId,
+                    queued.track(),
+                    audienceTarget(),
+                    Duration.ZERO,
+                    Instant.now(),
+                    "previous",
+                    Duration.ZERO);
+            broadcast(packet);
+            scheduleAutoAdvance(queued.track());
+        }, () -> plugin.getLogger().fine("No previous track in history."));
+    }
+
     public void stop() {
         session.stop();
         cancelAutoAdvance();
         broadcastControl(AudioCommandType.STOP, "stop");
+    }
+
+    /**
+     * Sends the current playback state to a single player. Called when a player
+     * (re)joins with the mod installed so they pick up the song mid-stream rather
+     * than missing it until the next track starts.
+     *
+     * <p>Does nothing if the session is idle or paused — a paused track will be
+     * resumed for everyone at once via the normal resume command.
+     */
+    public void syncPlayer(Player player) {
+        KaraokeSession.PlaybackSnapshot snapshot = session.snapshot();
+        if (snapshot.current() == null || snapshot.state() != PlaybackState.PLAYING) {
+            return;
+        }
+        String playbackId = snapshot.current().track().id();
+        AudioCommandPacket packet = new AudioCommandPacket(
+                AudioCommandType.PLAY,
+                KaraokeSession.GLOBAL_SESSION_ID,
+                playbackId,
+                snapshot.current().track(),
+                audienceTarget(),
+                snapshot.offset(),
+                Instant.now(),
+                "rejoin-sync",
+                Duration.ZERO);
+        messenger.send(player, packet);
     }
 
     public void setAudienceAll() {

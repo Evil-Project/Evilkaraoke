@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -18,8 +19,12 @@ import org.evilproject.evilkaraoke.common.model.PlaybackState;
 public final class KaraokeSession {
     public static final String GLOBAL_SESSION_ID = "global";
 
+    private static final int MAX_HISTORY = 10;
+
     private final Queue<QueuedTrack> requests = new ArrayDeque<>();
     private final Queue<QueuedTrack> randomTracks = new ArrayDeque<>();
+    /** Tracks that have already played, most-recent last. Bounded to MAX_HISTORY entries. */
+    private final Deque<QueuedTrack> history = new ArrayDeque<>();
     private PlaybackState state = PlaybackState.IDLE;
     private QueuedTrack current;
     private Instant startedAt;
@@ -35,6 +40,12 @@ public final class KaraokeSession {
     }
 
     public synchronized Optional<QueuedTrack> next() {
+        if (current != null) {
+            history.addLast(current);
+            if (history.size() > MAX_HISTORY) {
+                history.removeFirst();
+            }
+        }
         QueuedTrack next = requests.poll();
         if (next == null) {
             next = randomTracks.poll();
@@ -50,6 +61,27 @@ public final class KaraokeSession {
         startedAt = Instant.now();
         pausedOffset = Duration.ZERO;
         return Optional.of(next);
+    }
+
+    /**
+     * Restores the most-recently-played track as {@code current} so the coordinator
+     * can re-broadcast it from the start. Returns empty when history is exhausted.
+     */
+    public synchronized Optional<QueuedTrack> previous() {
+        if (history.isEmpty()) {
+            return Optional.empty();
+        }
+        // If something is currently playing, push it back to the front of requests
+        // so it isn't lost — the user can still get back to it with /ek next.
+        if (current != null) {
+            requests.add(current);
+        }
+        QueuedTrack prev = history.removeLast();
+        current = prev;
+        state = PlaybackState.PLAYING;
+        startedAt = Instant.now();
+        pausedOffset = Duration.ZERO;
+        return Optional.of(prev);
     }
 
     public synchronized void pause() {
@@ -70,6 +102,7 @@ public final class KaraokeSession {
         current = null;
         requests.clear();
         randomTracks.clear();
+        history.clear();
         startedAt = null;
         pausedOffset = Duration.ZERO;
         state = PlaybackState.IDLE;

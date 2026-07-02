@@ -7,15 +7,18 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.evilproject.evilkaraoke.paper.permission.PermissionService;
 import org.evilproject.evilkaraoke.paper.stats.SongStats;
 import org.evilproject.evilkaraoke.paper.stats.StatsService;
 import org.evilproject.evilkaraoke.paper.stats.UserStats;
 
 public final class StatsCommand {
     private final StatsService statsService;
+    private final PermissionService permissionService;
 
-    public StatsCommand(StatsService statsService) {
+    public StatsCommand(StatsService statsService, PermissionService permissionService) {
         this.statsService = statsService;
+        this.permissionService = permissionService;
     }
 
     public boolean handle(CommandSender sender, String[] args) {
@@ -46,6 +49,7 @@ public final class StatsCommand {
         sender.sendMessage(Component.text("Listen time: " + stats.listenSeconds() + "s", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Songs listened: " + stats.songsListened(), NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Songs requested: " + stats.songsRequested(), NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("Permission group: " + permissionService.getGroup(player), NamedTextColor.GRAY));
         return true;
     }
 

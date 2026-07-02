@@ -16,6 +16,7 @@ import org.evilproject.evilkaraoke.paper.messaging.ClientRegistry;
 import org.evilproject.evilkaraoke.paper.messaging.EvilkaraokeMessageListener;
 import org.evilproject.evilkaraoke.paper.messaging.PlaybackMessenger;
 import org.evilproject.evilkaraoke.paper.playback.PlaybackCoordinator;
+import org.evilproject.evilkaraoke.paper.permission.PermissionService;
 import org.evilproject.evilkaraoke.paper.stats.StatsService;
 
 public final class EvilkaraokePlugin extends JavaPlugin {
@@ -23,6 +24,7 @@ public final class EvilkaraokePlugin extends JavaPlugin {
     private final JsonPacketCodec packetCodec = new JsonPacketCodec();
     private EvilkaraokeConfig config;
     private EvilkaraokeCommand command;
+    private PermissionService permissionService;
     private StatsService statsService;
     private PlaybackCoordinator coordinator;
     private NeurokaraokeClient neurokaraokeClient;
@@ -31,6 +33,7 @@ public final class EvilkaraokePlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        permissionService = new PermissionService(getLogger());
         saveResource("messages.yml", false);
         config = EvilkaraokeConfig.from(getConfig());
 
@@ -42,7 +45,7 @@ public final class EvilkaraokePlugin extends JavaPlugin {
         coordinator = new PlaybackCoordinator(this, clientRegistry, messenger, neurokaraokeClient, config);
 
         registerMessaging();
-        registerCommands();
+        registerCommands(permissionService);
         scheduleStatsSave();
         getLogger().info("Evilkaraoke enabled with server-authoritative playback coordination.");
     }
@@ -65,18 +68,18 @@ public final class EvilkaraokePlugin extends JavaPlugin {
         if (coordinator != null) {
             coordinator.update(neurokaraokeClient, config);
         }
-        registerCommands();
+        registerCommands(permissionService);
     }
 
     private void registerMessaging() {
         getServer().getMessenger().registerOutgoingPluginChannel(this, EvilkaraokeProtocol.AUDIO_CHANNEL);
-        EvilkaraokeMessageListener listener = new EvilkaraokeMessageListener(this, clientRegistry, packetCodec);
+        EvilkaraokeMessageListener listener = new EvilkaraokeMessageListener(this, clientRegistry, packetCodec, coordinator);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilkaraokeProtocol.HELLO_CHANNEL, listener);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilkaraokeProtocol.STATUS_CHANNEL, listener);
     }
 
-    private void registerCommands() {
-        command = new EvilkaraokeCommand(this, clientRegistry, coordinator, neurokaraokeClient, statsService, config, this::reloadEvilkaraokeConfig);
+    private void registerCommands(PermissionService permissionService) {
+        command = new EvilkaraokeCommand(this, clientRegistry, coordinator, neurokaraokeClient, statsService, config, permissionService, this::reloadEvilkaraokeConfig);
         PluginCommand pluginCommand = Objects.requireNonNull(getCommand("evilkaraoke"), "evilkaraoke command missing from plugin.yml");
         pluginCommand.setExecutor(command);
         pluginCommand.setTabCompleter(command);
