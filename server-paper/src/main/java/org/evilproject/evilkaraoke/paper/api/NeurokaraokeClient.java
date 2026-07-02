@@ -300,7 +300,11 @@ public final class NeurokaraokeClient {
         String absolute = firstString(object, "absolutePath", "path", "audio");
         AudioAsset primary = asset(opus, AudioFormat.OPUS);
         AudioAsset fallback = absolute == null ? null : asset(absolute, AudioFormat.UNKNOWN);
-        return new KaraokeTrack(id == null ? title : id, TrackType.SONG, title == null ? "Unknown Song" : title, artist, primary == null ? fallback : primary, fallback, duration(object));
+        AudioAsset resolved = primary != null ? primary : fallback;
+        if (resolved == null) {
+            throw new IllegalStateException("Neurokaraoke API returned a track with no audio URL (id=" + id + ")");
+        }
+        return new KaraokeTrack(id == null ? title : id, TrackType.SONG, title == null ? "Unknown Song" : title, artist, resolved, fallback, duration(object));
     }
 
     private NeurokaraokeSetlist setlistFromElement(JsonElement element) {

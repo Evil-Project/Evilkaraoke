@@ -21,8 +21,8 @@ public final class KaraokeSession {
 
     private static final int MAX_HISTORY = 10;
 
-    private final Queue<QueuedTrack> requests = new ArrayDeque<>();
-    private final Queue<QueuedTrack> randomTracks = new ArrayDeque<>();
+    private final Deque<QueuedTrack> requests = new ArrayDeque<>();
+    private final Deque<QueuedTrack> randomTracks = new ArrayDeque<>();
     /** Tracks that have already played, most-recent last. Bounded to MAX_HISTORY entries. */
     private final Deque<QueuedTrack> history = new ArrayDeque<>();
     private PlaybackState state = PlaybackState.IDLE;
@@ -74,7 +74,7 @@ public final class KaraokeSession {
         // If something is currently playing, push it back to the front of requests
         // so it isn't lost — the user can still get back to it with /ek next.
         if (current != null) {
-            requests.add(current);
+            requests.addFirst(current);
         }
         QueuedTrack prev = history.removeLast();
         current = prev;

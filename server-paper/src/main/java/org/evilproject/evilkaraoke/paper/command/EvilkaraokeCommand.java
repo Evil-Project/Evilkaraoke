@@ -278,12 +278,18 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     private boolean next(CommandSender sender) {
+        if (!sender.hasPermission("evilkaraoke.playback.skip")) {
+            return deny(sender);
+        }
         coordinator.skip();
         sender.sendMessage(Component.text("Skipping to next track.", NamedTextColor.GREEN));
         return true;
     }
 
     private boolean previous(CommandSender sender) {
+        if (!sender.hasPermission("evilkaraoke.playback.skip")) {
+            return deny(sender);
+        }
         coordinator.previous();
         sender.sendMessage(Component.text("Going back to previous track.", NamedTextColor.GREEN));
         return true;
