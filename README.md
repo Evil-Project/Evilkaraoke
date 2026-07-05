@@ -1,23 +1,24 @@
 # Evilkaraoke
 
-A Minecraft karaoke system for Paper servers with Fabric and NeoForge client mods. Port of [neurokaraokebot](https://github.com/Mr-Auto/neurokaraokebot) from Discord to Minecraft.
+A Minecraft karaoke system for Paper, Fabric, and NeoForge servers with Fabric and NeoForge client playback. Port of [neurokaraokebot](https://github.com/Mr-Auto/neurokaraokebot) from Discord to Minecraft.
 
 ## Features
 
-- Server-authoritative queue management — all command logic runs on Paper
-- Client-only audio playback — mods stream audio from HTTP sources via JavaSound
+- Server-authoritative queue management — command logic runs on Paper, Fabric, or NeoForge servers
+- Client audio playback — Fabric and NeoForge mods stream audio from HTTP sources via JavaSound
 - Distance-based spatial audio — volume attenuates based on player position and world
 - Multi-loader support — Fabric and NeoForge clients on the same server
 - Audience targeting — play for all players, specific players, or yourself (like `/playsound`)
 - Radio mode — continuous random playback from configured stations
 - Statistics tracking — song plays, user requests, leaderboards
-- Plug-and-play — drop jars in `plugins/` and `mods/`, configure API endpoint, ready to use
+- Plug-and-play — use the Paper plugin or run the Fabric/NeoForge jar on both server and client, configure API endpoint, ready to use
 
 ## Requirements
 
-- **Server**: Paper 26.2+ (Java 25)
+- **Server**: Paper 26.2+, Fabric Loader 0.19.3+, or NeoForge 26.2.0.7-beta+ (Java 25)
 - **Client**: Minecraft 26.2 + Fabric Loader 0.19.3+ **or** NeoForge 26.2.0.7-beta+
 - **API**: Neurokaraoke-compatible API endpoint (configure in `config.yml`)
+- **Optional permissions**: LuckPerms on Paper or LuckPerms Fabric on Fabric servers
 
 ## Quick Start
 
@@ -25,15 +26,17 @@ A Minecraft karaoke system for Paper servers with Fabric and NeoForge client mod
 # Build the plugin and mods
 ./gradlew build
 
-# Server: copy plugin to your Paper server
-cp server-paper/build/libs/server-paper-0.1.0-SNAPSHOT.jar /path/to/server/plugins/
+# Paper server: copy plugin to your Paper server
+cp server-paper/build/libs/Evilkaraoke-Paper-0.1.0-SNAPSHOT.jar /path/to/server/plugins/
 
-# Client: copy mod to your Minecraft instance (pick one)
-cp client-fabric/build/libs/client-fabric-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
-cp client-neoforge/build/libs/client-neoforge-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
+# Fabric server or Fabric client: copy the same Fabric mod jar to mods/
+cp client-fabric/build/libs/Evilkaraoke-Fabric-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
+
+# NeoForge server or NeoForge client: copy the same NeoForge mod jar to mods/
+cp client-neoforge/build/libs/Evilkaraoke-NeoForge-0.1.0-SNAPSHOT.jar ~/.minecraft/mods/
 ```
 
-Start the server — `config.yml` and `messages.yml` are generated in `plugins/Evilkaraoke/`. Edit the API endpoints, then run `/ek reload`.
+Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and NeoForge generate `config/evilkaraoke/evilkaraoke.json`. Edit the API endpoints, then run `/ek reload`.
 
 ```
 /ek help                    # Show all commands
@@ -41,17 +44,18 @@ Start the server — `config.yml` and `messages.yml` are generated in `plugins/E
 /ek request Caramelldansen  # Queue and play
 /ek current                 # What's playing?
 /ek queue                   # What's up next?
+/ek queue move 2 1          # Move your queued song earlier
 /ek pause                   # Pause (ops only)
 /ek resume                  # Resume (ops only)
-/ek skip                    # Skip to next (ops only)
+/ek next                    # Skip to next (ops only)
 ```
 
 ## Installation
 
-### Server
+### Server (Paper)
 
 1. Download Paper 26.2+ from [papermc.io](https://papermc.io/downloads/paper)
-2. Place `server-paper-0.1.0-SNAPSHOT.jar` in your `plugins/` directory
+2. Place `Evilkaraoke-Paper-0.1.0-SNAPSHOT.jar` in your `plugins/` directory
 3. Start the server — `config.yml` and `messages.yml` are generated in `plugins/Evilkaraoke/`
 4. Configure your Neurokaraoke API endpoints in `config.yml` (see [Configuration](#configuration))
 5. Reload the plugin: `/ek reload`
@@ -59,14 +63,25 @@ Start the server — `config.yml` and `messages.yml` are generated in `plugins/E
 ### Client (Fabric)
 
 1. Install Fabric Loader 0.19.3+ for Minecraft 26.2
-2. Place `client-fabric-0.1.0-SNAPSHOT.jar` in your `mods/` directory
-3. Launch Minecraft and join a server running Evilkaraoke
+2. Place `Evilkaraoke-Fabric-0.1.0-SNAPSHOT.jar` in your `mods/` directory
+3. Launch Minecraft and join a server running the Evilkaraoke Paper plugin or Fabric server mod
+
+### Server (Fabric)
+
+1. Install Fabric Loader 0.19.3+ for Minecraft 26.2 on the server
+2. Place the same `Evilkaraoke-Fabric-0.1.0-SNAPSHOT.jar` in the server `mods/` directory
+3. Start the server and configure `config/evilkaraoke/evilkaraoke.json`
+4. Optional: install LuckPerms Fabric to manage `evilkaraoke.*` permissions
+
+The Fabric jar is both the server mod and the client audio mod. On a Paper server, install `Evilkaraoke-Paper-0.1.0-SNAPSHOT.jar` on the server and install the Fabric jar only on players' clients.
 
 ### Client (NeoForge)
 
 1. Install NeoForge 26.2.0.7-beta+ for Minecraft 26.2
-2. Place `client-neoforge-0.1.0-SNAPSHOT.jar` in your `mods/` directory
+2. Place `Evilkaraoke-NeoForge-0.1.0-SNAPSHOT.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running Evilkaraoke
+
+For a NeoForge server, place the same NeoForge jar in the server `mods/` directory. It registers the same command surface and server-authoritative playback flow as the Paper plugin.
 
 ### Testing Without an API
 
@@ -82,16 +97,21 @@ Commands requiring the API (`request`, `search`, `randomsong`) will fail gracefu
 
 ## Commands
 
-All commands use `/evilkaraoke` or the alias `/ek`.
+All commands use `/ek`.
 
 ### For All Players
 
 - `/ek help` — Show command help
 - `/ek search <query>` — Search for songs without queueing
-- `/ek request <query>` — Queue a song by name or URL
+- `/ek request <query>` — Search and queue a song
+- `/ek request id <songId>` — Queue a song by Neurokaraoke song id
+- `/ek request url <https://...> [title]` — Queue a direct public audio URL
+- `/ek setlist [page]` — Browse Neurokaraoke setlists
+- `/ek playlist [page]` — Browse public Neurokaraoke playlists and queue one by row
 - `/ek queue` — Show upcoming tracks
+- `/ek queue move <from> <to>` — Reorder your queued requested songs
+- `/ek cancel <position|all>` — Remove one or all of your queued songs
 - `/ek current` — Show currently playing track
-- `/ek next` — Show next track in queue
 - `/ek randomsong` — Queue a random song
 - `/ek stats me` — View your statistics
 - `/ek stats server` — View server statistics
@@ -100,11 +120,11 @@ All commands use `/evilkaraoke` or the alias `/ek`.
 
 - `/ek pause` — Pause current playback
 - `/ek resume` — Resume paused playback
-- `/ek skip` — Skip current track
+- `/ek previous` — Return to the previous track
+- `/ek next` — Skip current track
 - `/ek stop` — Stop playback and clear queue
 - `/ek audience <@a|@s|player>` — Set playback target (all/@a, self/@s, or specific player)
 - `/ek radio <radio21|swarmfm>` — Start radio mode
-- `/ek radiooff` — Stop radio mode
 - `/ek reload` — Reload configuration
 - `/ek doctor` — Show diagnostic information
 - `/ek listeners` — List connected clients
@@ -118,6 +138,7 @@ evilkaraoke.command.help: true           # Help command
 evilkaraoke.command.search: true         # Search songs
 evilkaraoke.command.request: true        # Queue songs
 evilkaraoke.command.queue: true          # View queue
+evilkaraoke.command.cancel: true         # Cancel own queued songs
 evilkaraoke.command.current: true        # View current track
 evilkaraoke.command.stats: true          # View statistics
 evilkaraoke.command.radio: true          # Use radio mode
@@ -126,17 +147,21 @@ evilkaraoke.playback.resume: op          # Resume playback
 evilkaraoke.playback.skip: op            # Skip tracks
 evilkaraoke.playback.stop: op            # Stop playback
 evilkaraoke.playback.audience: op        # Change audience
+evilkaraoke.admin.cancel: op             # Cancel any queued song
+evilkaraoke.admin.queue: op              # Reorder any requested queued song
 evilkaraoke.admin.reload: op             # Reload config
 evilkaraoke.admin.doctor: op             # Diagnostics
 ```
+
+On Fabric, Evilkaraoke uses `fabric-permissions-api-v0`, so LuckPerms Fabric can control the same permission nodes Paper uses. `/ek stats me` shows the player's LuckPerms primary group when LuckPerms is installed.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────┐
-│       Paper Server              │
+│ Paper / Fabric / NeoForge Server│
 │  ┌──────────────────────────┐   │       ┌──────────────────┐
-│  │  /evilkaraoke Commands   │   │       │  Fabric Client   │
+│  │  /ek Commands             │   │       │  Fabric Client   │
 │  │  Queue Management        │───┼───────┤  JavaSound Audio │
 │  │  Playback Coordinator    │   │ JSON  │  Spatial Volume  │
 │  │  Stats Tracking          │   │       └──────────────────┘
@@ -151,10 +176,11 @@ evilkaraoke.admin.doctor: op             # Diagnostics
 ### Modules
 
 - **common** — Shared protocol (packets, models, codec) - Java 25
-- **server-paper** — Paper plugin (commands, queue, API client, stats) - Paper 26.2
+- **server-common** — Loader-neutral server core (commands, queue, API client, stats)
+- **server-paper** — Paper plugin adapter - Paper 26.2
 - **client-common** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 25
-- **client-fabric** — Fabric mod entrypoint + custom payload networking - MC 26.2 + Fabric
-- **client-neoforge** — NeoForge mod entrypoint + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
+- **client-fabric** — Fabric client/server entrypoints + custom payload networking - MC 26.2 + Fabric
+- **client-neoforge** — NeoForge client/server entrypoints + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
 
 ### Protocol
 
@@ -195,13 +221,15 @@ api:
   searchUrl: "https://api.neurokaraoke.com/api/songs"
   songUrl: "https://api.neurokaraoke.com/api/songs/"
   playlistUrl: "https://api.neurokaraoke.com/api/playlist/"
+  publicPlaylistUrl: "https://api.neurokaraoke.com/api/playlist/public"
+  publicPlaylistDetailUrl: "https://idk.neurokaraoke.com/public/playlist/"
   artistUrl: "https://api.neurokaraoke.com/api/artist/"
   audioBaseUrl: "https://audio.neurokaraoke.com/"
   imagesBaseUrl: "https://images.neurokaraoke.com"
 
 playback:
   defaultTargets: "@a"
-  defaultSource: "music"
+  defaultSource: "record"
   defaultVolume: 1.0
   defaultPitch: 1.0
   defaultMinVolume: 0.0
@@ -234,9 +262,9 @@ All user-facing messages are customizable with MiniMessage formatting support. C
 ```
 
 Artifacts:
-- `server-paper/build/libs/server-paper-0.1.0-SNAPSHOT.jar` (385 KB, includes dependencies)
-- `client-fabric/build/libs/client-fabric-0.1.0-SNAPSHOT.jar` (39 KB)
-- `client-neoforge/build/libs/client-neoforge-0.1.0-SNAPSHOT.jar` (39 KB)
+- `server-paper/build/libs/Evilkaraoke-Paper-0.1.0-SNAPSHOT.jar`
+- `client-fabric/build/libs/Evilkaraoke-Fabric-0.1.0-SNAPSHOT.jar`
+- `client-neoforge/build/libs/Evilkaraoke-NeoForge-0.1.0-SNAPSHOT.jar`
 
 ## Development
 
@@ -250,9 +278,10 @@ Artifacts:
 ```
 Evilkaraoke/
 ├── common/              # Shared protocol (packets, models, codec)
+├── server-common/       # Loader-neutral server core
 ├── client-common/       # Loader-neutral audio engine (JavaSound)
-├── client-fabric/       # Fabric mod (networking only)
-├── client-neoforge/     # NeoForge mod (networking only)
+├── client-fabric/       # Fabric mod (client + server networking)
+├── client-neoforge/     # NeoForge mod (client + server networking)
 ├── server-paper/        # Paper plugin (commands, API, queue, stats)
 ├── gradle/              # Gradle wrapper + libs.versions.toml
 └── build.gradle.kts     # Root build configuration
@@ -289,6 +318,7 @@ Tests cover:
 
 - Check that the API endpoint is configured and reachable
 - Verify the audio URL is accessible from the client
+- Ensure Minecraft's Master and Jukebox/Records sliders are above zero
 - Ensure client has JavaSound support (should work on all platforms)
 - Check client logs for decoding errors
 

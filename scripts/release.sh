@@ -37,7 +37,7 @@ Installation:
 1. Copy Evilkaraoke-$VERSION.jar to your Paper 26.2 server's plugins/ folder
 2. Start the server (generates default config)
 3. Edit plugins/Evilkaraoke/config.yml with your API endpoint
-4. Run /ek reload to apply changes
+4. Run /evilkaraoke reload to apply changes
 
 See README.md for full documentation and quick start guide.
 
@@ -46,11 +46,11 @@ Requirements:
 - Neurokaraoke-compatible API endpoint
 
 Commands:
-- /ek help - Show all commands
-- /ek request <song> - Queue a song
-- /ek pause/resume/skip/stop - Playback controls (ops)
-- /ek queue - Show upcoming tracks
-- /ek current - Show now playing
+- /evilkaraoke help - Show all commands
+- /evilkaraoke request <song> - Queue a song
+- /evilkaraoke pause/resume/next/stop - Playback controls (ops)
+- /evilkaraoke queue - Show upcoming tracks
+- /evilkaraoke current - Show now playing
 
 For support, see README.md troubleshooting section.
 EOF
