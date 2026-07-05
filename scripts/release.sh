@@ -4,9 +4,14 @@
 
 set -e
 
-VERSION="0.1.0-SNAPSHOT"
+VERSION="${1:-${RELEASE_VERSION:-0.1.1}}"
 BUILD_DIR="build/release"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GRADLE_ARGS=()
+
+if [ -n "${JAVA_INSTALLATIONS_PATHS:-}" ]; then
+    GRADLE_ARGS+=("-Dorg.gradle.java.installations.paths=$JAVA_INSTALLATIONS_PATHS")
+fi
 
 echo "=== Evilkaraoke Release Builder ==="
 echo "Version: $VERSION"
@@ -16,7 +21,7 @@ echo ""
 # Clean and build
 echo "[1/5] Building project..."
 cd "$PROJECT_ROOT"
-./gradlew clean build --no-daemon --console=plain > /dev/null 2>&1
+./gradlew "${GRADLE_ARGS[@]}" clean build --no-daemon --console=plain -PreleaseVersion="$VERSION"
 echo "✓ Build successful"
 
 # Create release directory
@@ -27,14 +32,14 @@ echo "✓ Release directory ready"
 
 # Package server
 echo "[3/5] Packaging server plugin..."
-cp server-paper/build/libs/server-paper-$VERSION.jar "$BUILD_DIR/server/Evilkaraoke-$VERSION.jar"
+cp server-paper/build/libs/Evilkaraoke-Paper-$VERSION.jar "$BUILD_DIR/server/Evilkaraoke-Paper-$VERSION.jar"
 cp README.md "$BUILD_DIR/server/"
 cp server-paper/src/main/resources/config.yml "$BUILD_DIR/server/config-example.yml"
 cat > "$BUILD_DIR/server/README.txt" << EOF
 Evilkaraoke Server Plugin - Version $VERSION
 
 Installation:
-1. Copy Evilkaraoke-$VERSION.jar to your Paper 26.2 server's plugins/ folder
+1. Copy Evilkaraoke-Paper-$VERSION.jar to your Paper 26.2 server's plugins/ folder
 2. Start the server (generates default config)
 3. Edit plugins/Evilkaraoke/config.yml with your API endpoint
 4. Run /evilkaraoke reload to apply changes
@@ -58,7 +63,7 @@ echo "✓ Server package ready: $BUILD_DIR/server/"
 
 # Package Fabric client
 echo "[4/5] Packaging Fabric client mod..."
-cp client-fabric/build/libs/client-fabric-$VERSION.jar "$BUILD_DIR/client-fabric/Evilkaraoke-Fabric-$VERSION.jar"
+cp client-fabric/build/libs/Evilkaraoke-Fabric-$VERSION.jar "$BUILD_DIR/client-fabric/Evilkaraoke-Fabric-$VERSION.jar"
 cat > "$BUILD_DIR/client-fabric/README.txt" << EOF
 Evilkaraoke Fabric Client Mod - Version $VERSION
 
@@ -80,7 +85,7 @@ echo "✓ Fabric package ready: $BUILD_DIR/client-fabric/"
 
 # Package NeoForge client
 echo "[5/5] Packaging NeoForge client mod..."
-cp client-neoforge/build/libs/client-neoforge-$VERSION.jar "$BUILD_DIR/client-neoforge/Evilkaraoke-NeoForge-$VERSION.jar"
+cp client-neoforge/build/libs/Evilkaraoke-NeoForge-$VERSION.jar "$BUILD_DIR/client-neoforge/Evilkaraoke-NeoForge-$VERSION.jar"
 cat > "$BUILD_DIR/client-neoforge/README.txt" << EOF
 Evilkaraoke NeoForge Client Mod - Version $VERSION
 
@@ -123,11 +128,11 @@ echo "  - Evilkaraoke-Fabric-$VERSION.tar.gz"
 echo "  - Evilkaraoke-NeoForge-$VERSION.tar.gz"
 echo ""
 echo "Individual JARs also available in:"
-echo "  - server/Evilkaraoke-$VERSION.jar"
+echo "  - server/Evilkaraoke-Paper-$VERSION.jar"
 echo "  - client-fabric/Evilkaraoke-Fabric-$VERSION.jar"
 echo "  - client-neoforge/Evilkaraoke-NeoForge-$VERSION.jar"
 echo ""
 echo "File sizes:"
-du -h "$BUILD_DIR"/*.tar.gz | awk '{print "  - " $2 ": " $1}'
+du -h ./*.tar.gz | awk '{print "  - " $2 ": " $1}'
 echo ""
 echo "✓ Ready for distribution"

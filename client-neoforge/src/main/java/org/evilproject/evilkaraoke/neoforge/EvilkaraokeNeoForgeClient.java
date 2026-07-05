@@ -27,7 +27,7 @@ import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
  */
 public final class EvilkaraokeNeoForgeClient {
     private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
-    private static final String MOD_VERSION = "0.1.0";
+    private static final String MOD_VERSION = "0.1.1";
     private static final int STATUS_REPORT_INTERVAL_TICKS = 20; // Report status every second
     private static final int HELLO_RETRY_TICKS = 100;
     private static final int HELLO_RETRY_INTERVAL_TICKS = 20;
