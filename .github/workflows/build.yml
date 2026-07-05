@@ -63,7 +63,51 @@ jobs:
             !**/*-sources.jar
             !**/*-javadoc.jar
 
-      - name: Publish to Modrinth
+      - name: Publish Fabric mod to Modrinth
+        if: github.event_name == 'release'
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_PROJECT_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+
+          files: |
+            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
+            !**/*-sources.jar
+            !**/*-javadoc.jar
+
+          loaders: |
+            fabric
+          game-versions: |
+            26.2
+          java: |
+            25
+          name: Evilkaraoke Fabric ${{ steps.release-version.outputs.version }}
+          version: ${{ steps.release-version.outputs.version }}-fabric
+          version-type: ${{ github.event.release.prerelease && 'beta' || 'release' }}
+
+      - name: Publish NeoForge mod to Modrinth
+        if: github.event_name == 'release'
+        uses: Kir-Antipov/mc-publish@v3.3
+        with:
+          modrinth-id: ${{ vars.MODRINTH_PROJECT_ID }}
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+
+          files: |
+            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
+            !**/*-sources.jar
+            !**/*-javadoc.jar
+
+          loaders: |
+            neoforge
+          game-versions: |
+            26.2
+          java: |
+            25
+          name: Evilkaraoke NeoForge ${{ steps.release-version.outputs.version }}
+          version: ${{ steps.release-version.outputs.version }}-neoforge
+          version-type: ${{ github.event.release.prerelease && 'beta' || 'release' }}
+
+      - name: Publish Paper plugin to Modrinth
         if: github.event_name == 'release'
         uses: Kir-Antipov/mc-publish@v3.3
         with:
@@ -72,18 +116,15 @@ jobs:
 
           files: |
             server-paper/build/libs/Evilkaraoke-Paper-*.jar
-            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
-            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
             !**/*-sources.jar
             !**/*-javadoc.jar
 
           loaders: |
             paper
-            fabric
-            neoforge
           game-versions: |
             26.2
           java: |
             25
-          version: ${{ steps.release-version.outputs.version }}
+          name: Evilkaraoke Paper ${{ steps.release-version.outputs.version }}
+          version: ${{ steps.release-version.outputs.version }}-paper
           version-type: ${{ github.event.release.prerelease && 'beta' || 'release' }}
