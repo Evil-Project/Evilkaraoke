@@ -9,6 +9,7 @@ import org.evilproject.evilkaraoke.client.audio.JavaSoundAudioBackend;
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.model.SoundCategory;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
@@ -27,6 +28,8 @@ public final class ClientAudioController {
     private final String modVersion;
     private final String minecraftVersion;
     private final String loader;
+    private volatile SoundCategory soundCategory = SoundCategory.MUSIC;
+    private volatile String currentPlaybackId = null;
     /** Optional hook called on the game thread when a PLAY command is dispatched. */
     private Consumer<KaraokeTrack> onPlayCallback;
 
@@ -57,6 +60,7 @@ public final class ClientAudioController {
      */
     public void stopAll() {
         backend.stop(null);
+        currentPlaybackId = null;
     }
 
     /** @return the handshake bytes to send on the hello channel when joining a server. */
@@ -79,6 +83,14 @@ public final class ClientAudioController {
     }
 
     /** Builds a status payload the loader can send back on the status channel. */
+    public byte[] statusPayload() {
+        AudioBackendStatus status = backend.status();
+        String playbackId = currentPlaybackId != null ? currentPlaybackId : "none";
+        return codec.encode(new ClientStatusPacket(playbackId, status.state(), null, status.message()));
+    }
+
+    /** @deprecated Use {@link #statusPayload()} instead */
+    @Deprecated
     public byte[] statusPayload(String playbackId) {
         AudioBackendStatus status = backend.status();
         return codec.encode(new ClientStatusPacket(playbackId, status.state(), null, status.message()));
@@ -88,20 +100,49 @@ public final class ClientAudioController {
         return backend.status();
     }
 
+    /**
+     * Applies the local Minecraft sound settings to JavaSound playback. Loader
+     * modules call this from the client tick because JavaSound runs outside
+     * Minecraft's own sound engine.
+     */
+    public void setGameVolume(float linearGain) {
+        backend.setGameVolume(linearGain);
+    }
+
+    public SoundCategory soundCategory() {
+        return soundCategory;
+    }
+
     private void dispatch(AudioCommandPacket command) {
         AudioCommandType type = command.command();
         switch (type) {
             case PLAY -> {
+                updateSoundCategory(command);
+                currentPlaybackId = command.playbackId();
                 backend.play(command);
                 if (onPlayCallback != null && command.track() != null) {
                     onPlayCallback.accept(command.track());
                 }
             }
-            case PAUSE -> backend.pause(command);
-            case RESUME -> backend.resume(command);
-            case STOP -> backend.stop(command);
+            case PAUSE -> {
+                if (isCurrentPlayback(command)) {
+                    backend.pause(command);
+                }
+            }
+            case RESUME -> {
+                if (isCurrentPlayback(command)) {
+                    backend.resume(command);
+                }
+            }
+            case STOP -> {
+                if (isCurrentPlayback(command)) {
+                    backend.stop(command);
+                    currentPlaybackId = null;
+                }
+            }
             case VOLUME -> {
-                if (command.target() != null) {
+                if (isCurrentPlayback(command) && command.target() != null) {
+                    updateSoundCategory(command);
                     backend.setVolume(command.target().volume());
                 }
             }
@@ -109,6 +150,17 @@ public final class ClientAudioController {
                 // Continuous local playback already tracks the stream; nothing to reseek.
             }
         }
+    }
+
+    private void updateSoundCategory(AudioCommandPacket command) {
+        if (command.target() != null && command.target().category() != null) {
+            soundCategory = command.target().category();
+        }
+    }
+
+    private boolean isCurrentPlayback(AudioCommandPacket command) {
+        String playbackId = currentPlaybackId;
+        return playbackId != null && playbackId.equals(command.playbackId());
     }
 
     public void forEachChannelName(Consumer<String> consumer) {

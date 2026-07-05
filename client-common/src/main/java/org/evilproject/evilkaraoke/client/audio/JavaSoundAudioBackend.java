@@ -3,13 +3,18 @@ package org.evilproject.evilkaraoke.client.audio;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -17,13 +22,15 @@ import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.DataLine;
-import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.SourceDataLine;
+import javax.sound.sampled.spi.AudioFileReader;
+import javax.sound.sampled.spi.FormatConversionProvider;
 
 import org.evilproject.evilkaraoke.common.model.AudioAsset;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
+import org.evilproject.evilkaraoke.common.security.AudioUrlValidator;
 
 /**
  * Loader-neutral audio backend. Decodes the server-provided asset URL through
@@ -35,16 +42,30 @@ import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
  * {@code /playsound}.
  */
 public final class JavaSoundAudioBackend implements AudioBackend {
+    private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
     private static final int MAX_BUFFERED_ASSET_BYTES = 128 * 1024 * 1024;
+    private static final int MAX_REDIRECTS = 5;
+    private static final int AUDIO_SIGNATURE_BYTES = 512;
+    private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Pattern CONTENT_RANGE = Pattern.compile("bytes (\\d+)-(\\d+)/(\\d+|\\*)");
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL)
+            .followRedirects(HttpClient.Redirect.NEVER)
             .build();
+    private final UnaryOperator<URI> uriValidator;
     private final AtomicReference<PlaybackHandle> current = new AtomicReference<>();
     private volatile AudioBackendStatus status = AudioBackendStatus.ready();
-    private volatile float gain = 1.0f;
+    private volatile float serverGain = 1.0f;
+    private volatile float gameGain = 1.0f;
+
+    public JavaSoundAudioBackend() {
+        this(AudioUrlValidator::validatePublicHttpUrl);
+    }
+
+    JavaSoundAudioBackend(UnaryOperator<URI> uriValidator) {
+        this.uriValidator = uriValidator;
+    }
 
     @Override
     public void play(AudioCommandPacket packet) {
@@ -54,7 +75,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             status = AudioBackendStatus.error("PLAY packet had no track");
             return;
         }
-        gain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
+        serverGain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
         Duration seekOffset = packet.offset() != null ? packet.offset() : Duration.ZERO;
         PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), seekOffset);
         current.set(handle);
@@ -68,7 +89,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     @Override
     public void pause(AudioCommandPacket packet) {
         PlaybackHandle handle = current.get();
-        if (handle != null) {
+        if (handle != null && !handle.stopped) {
             handle.paused = true;
             SourceDataLine line = handle.line;
             if (line != null) {
@@ -81,7 +102,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     @Override
     public void resume(AudioCommandPacket packet) {
         PlaybackHandle handle = current.get();
-        if (handle != null) {
+        if (handle != null && !handle.stopped) {
             handle.paused = false;
             SourceDataLine line = handle.line;
             if (line != null) {
@@ -105,48 +126,59 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     /** Applies a new linear gain (0..1), e.g. from a VOLUME packet or listener move. */
     @Override
     public void setVolume(float newGain) {
-        this.gain = clamp01(newGain);
-        PlaybackHandle handle = current.get();
-        if (handle != null) {
-            applyGain(handle.line, this.gain);
-        }
+        this.serverGain = clamp01(newGain);
+    }
+
+    @Override
+    public void setGameVolume(float newGain) {
+        this.gameGain = clamp01(newGain);
     }
 
     private void runPlayback(PlaybackHandle handle, KaraokeTrack track) {
-        Exception primaryError = tryPlayAsset(handle, track.primaryAsset());
-        if (primaryError == null || handle.stopped) {
-            return;
-        }
-        AudioAsset fallback = track.fallbackAsset();
-        if (fallback != null) {
-            Exception fallbackError = tryPlayAsset(handle, fallback);
-            if (fallbackError == null || handle.stopped) {
+        try {
+            Exception primaryError = tryPlayAsset(handle, track.primaryAsset());
+            if (primaryError == null || handle.stopped) {
                 return;
             }
-            status = AudioBackendStatus.error("Could not decode " + track.title() + ": " + fallbackError.getMessage());
-            return;
+            AudioAsset fallback = track.fallbackAsset();
+            if (fallback != null) {
+                Exception fallbackError = tryPlayAsset(handle, fallback);
+                if (fallbackError == null || handle.stopped) {
+                    return;
+                }
+                failPlayback(handle, track, fallbackError);
+                return;
+            }
+            failPlayback(handle, track, primaryError);
+        } finally {
+            current.compareAndSet(handle, null);
         }
-        status = AudioBackendStatus.error("Could not decode " + track.title() + ": " + primaryError.getMessage());
+    }
+
+    private void failPlayback(PlaybackHandle handle, KaraokeTrack track, Exception error) {
+        String message = "Could not decode " + track.title() + ": " + error.getMessage();
+        handle.stopped = true;
+        current.compareAndSet(handle, null);
+        status = AudioBackendStatus.error(message);
+        LOGGER.log(Level.WARNING, "Evilkaraoke client playback failed for " + track.title(), error);
     }
 
     private Exception tryPlayAsset(PlaybackHandle handle, AudioAsset asset) {
         if (asset == null) {
             return new IllegalStateException("no asset");
         }
-        // AudioSystem discovers decode/convert SPIs through the thread context
-        // classloader. On Fabric/NeoForge the network thread's context loader does
-        // not see the bundled decoders, so pin it to this mod's loader while we
-        // resolve providers, otherwise no provider is found and playback is silent.
+        // AudioSystem discovers fallback SPIs through the thread context classloader.
+        // On Fabric/NeoForge the network thread's context loader may not see the
+        // bundled decoders, so pin it to this mod's loader while providers resolve.
         Thread worker = Thread.currentThread();
         ClassLoader previousLoader = worker.getContextClassLoader();
         worker.setContextClassLoader(JavaSoundAudioBackend.class.getClassLoader());
-        try (InputStream source = openDecodableStream(asset);
-             AudioInputStream encoded = AudioSystem.getAudioInputStream(source);
-             AudioInputStream pcm = AudioSystem.getAudioInputStream(pcmFormatFor(encoded.getFormat()), encoded)) {
+        try (InputStream source = openDecodableStream(handle, asset);
+             AudioInputStream encoded = openEncodedAudioInputStream(source);
+             AudioInputStream pcm = openPcmAudioInputStream(encoded)) {
             SourceDataLine line = openLine(pcm.getFormat());
             handle.line = line;
             try {
-                applyGain(line, gain);
                 line.start();
                 if (asset.format() != org.evilproject.evilkaraoke.common.model.AudioFormat.STREAM) {
                     seekPcm(handle, pcm, pcm.getFormat());
@@ -176,6 +208,95 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         } finally {
             worker.setContextClassLoader(previousLoader);
         }
+    }
+
+    static AudioInputStream openEncodedAudioInputStream(InputStream source) throws Exception {
+        InputStream markable = source.markSupported() ? source : new BufferedInputStream(source, 1 << 16);
+        EncodedAudioKind kind = detectAudioKind(markable);
+        if (kind != EncodedAudioKind.UNKNOWN) {
+            return readerFor(kind).getAudioInputStream(markable);
+        }
+        return AudioSystem.getAudioInputStream(markable);
+    }
+
+    private static AudioInputStream openPcmAudioInputStream(AudioInputStream encoded) {
+        AudioFormat target = pcmFormatFor(encoded.getFormat());
+        for (FormatConversionProvider provider : conversionProviders()) {
+            if (provider.isConversionSupported(target, encoded.getFormat())) {
+                return provider.getAudioInputStream(target, encoded);
+            }
+        }
+        return AudioSystem.getAudioInputStream(target, encoded);
+    }
+
+    static EncodedAudioKind detectAudioKind(InputStream source) throws java.io.IOException {
+        source.mark(AUDIO_SIGNATURE_BYTES);
+        byte[] header = source.readNBytes(AUDIO_SIGNATURE_BYTES);
+        source.reset();
+        if (startsWith(header, 'O', 'g', 'g', 'S')) {
+            if (contains(header, "OpusHead")) {
+                return EncodedAudioKind.OPUS;
+            }
+            if (contains(header, "\u0001vorbis")) {
+                return EncodedAudioKind.VORBIS;
+            }
+        }
+        if (startsWith(header, 'I', 'D', '3') || startsWithMpegFrame(header)) {
+            return EncodedAudioKind.MP3;
+        }
+        return EncodedAudioKind.UNKNOWN;
+    }
+
+    private static boolean startsWith(byte[] bytes, int... prefix) {
+        if (bytes.length < prefix.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if ((bytes[i] & 0xFF) != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean startsWithMpegFrame(byte[] bytes) {
+        return bytes.length >= 2
+                && (bytes[0] & 0xFF) == 0xFF
+                && (bytes[1] & 0xE0) == 0xE0;
+    }
+
+    private static boolean contains(byte[] bytes, String needle) {
+        byte[] target = needle.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        for (int i = 0; i <= bytes.length - target.length; i++) {
+            boolean matched = true;
+            for (int j = 0; j < target.length; j++) {
+                if (bytes[i + j] != target[j]) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static AudioFileReader readerFor(EncodedAudioKind kind) {
+        return switch (kind) {
+            case OPUS -> new io.github.jseproject.OpusAudioFileReader();
+            case VORBIS -> new io.github.jseproject.VorbisAudioFileReader();
+            case MP3 -> new javazoom.spi.mpeg.sampled.file.MpegAudioFileReader();
+            case UNKNOWN -> throw new IllegalArgumentException("Unknown encoded audio kind");
+        };
+    }
+
+    private static FormatConversionProvider[] conversionProviders() {
+        return new FormatConversionProvider[] {
+                new io.github.jseproject.OpusFormatConversionProvider(),
+                new io.github.jseproject.VorbisFormatConversionProvider(),
+                new javazoom.spi.mpeg.sampled.convert.MpegFormatConversionProvider()
+        };
     }
 
     /**
@@ -258,6 +379,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             if (handle.stopped) {
                 return;
             }
+            applySoftwareGain(buffer, read, effectiveGain());
             int offset = 0;
             while (offset < read && !handle.stopped) {
                 int written = line.write(buffer, offset, read - offset);
@@ -293,36 +415,41 @@ public final class JavaSoundAudioBackend implements AudioBackend {
      * streams keep streaming with a large rewind window for header detection.
      */
     InputStream openDecodableStream(AudioAsset asset) throws Exception {
-        if (asset.format() == org.evilproject.evilkaraoke.common.model.AudioFormat.STREAM) {
-            return new BufferedInputStream(openStream(asset.url()), 1 << 16);
-        }
-        return new ByteArrayInputStream(downloadFiniteAsset(asset.url()));
+        return openDecodableStream(null, asset);
     }
 
-    private InputStream openStream(String url) throws Exception {
-        HttpResponse<InputStream> response = sendGet(url, null);
+    private InputStream openDecodableStream(PlaybackHandle handle, AudioAsset asset) throws Exception {
+        ensureNotStopped(handle);
+        if (asset.format() == org.evilproject.evilkaraoke.common.model.AudioFormat.STREAM) {
+            return new BufferedInputStream(openStream(handle, asset.url()), 1 << 16);
+        }
+        return new ByteArrayInputStream(downloadFiniteAsset(handle, asset.url()));
+    }
+
+    private InputStream openStream(PlaybackHandle handle, String url) throws Exception {
+        HttpResponse<InputStream> response = sendGet(handle, url, null);
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             response.body().close();
-            throw new IllegalStateException("HTTP " + response.statusCode() + " for " + url);
+            throw new IllegalStateException("HTTP " + response.statusCode() + " for audio URL");
         }
-        return response.body();
+        return trackedBody(handle, stripIcyMetadata(response));
     }
 
-    private byte[] downloadFiniteAsset(String url) throws Exception {
-        HttpResponse<InputStream> response = sendGet(url, null);
-        try (InputStream body = response.body()) {
+    private byte[] downloadFiniteAsset(PlaybackHandle handle, String url) throws Exception {
+        HttpResponse<InputStream> response = sendGet(handle, url, null);
+        try (InputStream body = trackedBody(handle, response)) {
             if (response.statusCode() == 200) {
-                return readBounded(body);
+                return readBounded(handle, body);
             }
             if (response.statusCode() != 206) {
-                throw new IllegalStateException("HTTP " + response.statusCode() + " for " + url);
+                throw new IllegalStateException("HTTP " + response.statusCode() + " for audio URL");
             }
-            ByteRange range = byteRange(response, url);
+            ByteRange range = byteRange(response);
             if (range.start() != 0) {
-                throw new IllegalStateException("Unexpected initial byte range " + range.start() + " for " + url);
+                throw new IllegalStateException("Unexpected initial byte range " + range.start());
             }
-            byte[] firstChunk = readBounded(body);
-            validateChunkLength(firstChunk.length, range, url);
+            byte[] firstChunk = readBounded(handle, body);
+            validateChunkLength(firstChunk.length, range);
             if (!range.hasKnownTotal() || range.isComplete()) {
                 return firstChunk;
             }
@@ -331,24 +458,24 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             long nextStart = range.endInclusive() + 1;
             int total = range.total();
             while (nextStart < total) {
-                ensureBufferedSize(nextStart, url);
+                ensureBufferedSize(nextStart, "audio asset");
                 ByteRange nextRange;
                 byte[] chunk;
-                HttpResponse<InputStream> nextResponse = sendGet(url, "bytes=" + nextStart + "-");
-                try (InputStream nextBody = nextResponse.body()) {
+                HttpResponse<InputStream> nextResponse = sendGet(handle, url, "bytes=" + nextStart + "-");
+                try (InputStream nextBody = trackedBody(handle, nextResponse)) {
                     if (nextResponse.statusCode() != 206) {
-                        throw new IllegalStateException("HTTP " + nextResponse.statusCode() + " while requesting " + url + " from byte " + nextStart);
+                        throw new IllegalStateException("HTTP " + nextResponse.statusCode() + " while requesting audio bytes from " + nextStart);
                     }
-                    nextRange = byteRange(nextResponse, url);
+                    nextRange = byteRange(nextResponse);
                     if (nextRange.start() != nextStart) {
-                        throw new IllegalStateException("Unexpected byte range " + nextRange.start() + " for " + url + "; expected " + nextStart);
+                        throw new IllegalStateException("Unexpected byte range " + nextRange.start() + "; expected " + nextStart);
                     }
                     if (!nextRange.hasKnownTotal() || nextRange.total() != total) {
-                        throw new IllegalStateException("Inconsistent Content-Range total for " + url);
+                        throw new IllegalStateException("Inconsistent Content-Range total for audio URL");
                     }
-                    chunk = readBounded(nextBody);
+                    chunk = readBounded(handle, nextBody);
                 }
-                validateChunkLength(chunk.length, nextRange, url);
+                validateChunkLength(chunk.length, nextRange);
                 out.write(chunk);
                 nextStart = nextRange.endInclusive() + 1;
             }
@@ -356,54 +483,162 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         }
     }
 
-    private HttpResponse<InputStream> sendGet(String url, String range) throws Exception {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
+    private HttpResponse<InputStream> sendGet(PlaybackHandle handle, String url, String range) throws Exception {
+        return sendGet(handle, validatedUri(url), range, 0);
+    }
+
+    private HttpResponse<InputStream> sendGet(PlaybackHandle handle, URI uri, String range, int redirects) throws Exception {
+        ensureNotStopped(handle);
+        HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
+                .timeout(HTTP_REQUEST_TIMEOUT)
                 .header("User-Agent", "Evilkaraoke-Client")
+                .header("Icy-MetaData", "0")
                 .GET();
         if (range != null) {
             builder.header("Range", range);
         }
-        return httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+        try {
+            ensureNotStopped(handle);
+        } catch (RuntimeException ex) {
+            response.body().close();
+            throw ex;
+        }
+        if (isRedirect(response.statusCode())) {
+            response.body().close();
+            if (redirects >= MAX_REDIRECTS) {
+                throw new IllegalStateException("Too many redirects while requesting audio URL");
+            }
+            String location = response.headers().firstValue("Location")
+                    .orElseThrow(() -> new IllegalStateException("Redirect response did not include Location"));
+            URI redirectUri = uriValidator.apply(uri.resolve(location));
+            return sendGet(handle, redirectUri, range, redirects + 1);
+        }
+        return response;
     }
 
-    private byte[] readBounded(InputStream body) throws java.io.IOException {
+    private URI validatedUri(String url) {
+        try {
+            return uriValidator.apply(audioUri(url));
+        } catch (IllegalArgumentException ex) {
+            String message = ex.getMessage();
+            if (message != null && message.startsWith("Audio URL")) {
+                throw ex;
+            }
+            throw new IllegalArgumentException("Audio URL is not valid");
+        }
+    }
+
+    private static URI audioUri(String url) {
+        if (url == null) {
+            throw new IllegalArgumentException("Audio URL is required");
+        }
+        return URI.create(url.replace(" ", "%20"));
+    }
+
+    private static InputStream trackedBody(PlaybackHandle handle, HttpResponse<InputStream> response) throws java.io.IOException {
+        return trackedBody(handle, response.body());
+    }
+
+    private static InputStream trackedBody(PlaybackHandle handle, InputStream body) throws java.io.IOException {
+        if (handle == null) {
+            return body;
+        }
+        TrackedInputStream tracked = new TrackedInputStream(handle, body);
+        activateStream(handle, tracked);
+        return tracked;
+    }
+
+    private static InputStream stripIcyMetadata(HttpResponse<InputStream> response) {
+        int metadataInterval = icyMetadataInterval(response);
+        if (metadataInterval <= 0) {
+            return response.body();
+        }
+        return new IcyMetadataInputStream(response.body(), metadataInterval);
+    }
+
+    private static int icyMetadataInterval(HttpResponse<?> response) {
+        return response.headers().firstValue("icy-metaint")
+                .map(String::trim)
+                .map(value -> {
+                    try {
+                        return Integer.parseInt(value);
+                    } catch (NumberFormatException ex) {
+                        return -1;
+                    }
+                })
+                .filter(value -> value > 0)
+                .orElse(-1);
+    }
+
+    private byte[] readBounded(PlaybackHandle handle, InputStream body) throws java.io.IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[64 * 1024];
         int read;
         while ((read = body.read(buffer)) != -1) {
+            ensureNotStopped(handle);
             ensureBufferedSize((long) out.size() + read, "audio asset");
             out.write(buffer, 0, read);
         }
         return out.toByteArray();
     }
 
-    private static ByteRange byteRange(HttpResponse<?> response, String url) {
+    private static void ensureNotStopped(PlaybackHandle handle) {
+        if (handle != null && handle.stopped) {
+            throw new IllegalStateException("playback stopped");
+        }
+    }
+
+    private static void activateStream(PlaybackHandle handle, InputStream stream) throws java.io.IOException {
+        if (handle.stopped) {
+            stream.close();
+            throw new IllegalStateException("playback stopped");
+        }
+        handle.activeStream = stream;
+        if (handle.stopped) {
+            clearActiveStream(handle, stream);
+            stream.close();
+            throw new IllegalStateException("playback stopped");
+        }
+    }
+
+    private static void clearActiveStream(PlaybackHandle handle, InputStream stream) {
+        if (handle.activeStream == stream) {
+            handle.activeStream = null;
+        }
+    }
+
+    private static ByteRange byteRange(HttpResponse<?> response) {
         String value = response.headers().firstValue("Content-Range")
-                .orElseThrow(() -> new IllegalStateException("Partial response without Content-Range for " + url));
+                .orElseThrow(() -> new IllegalStateException("Partial response without Content-Range for audio URL"));
         Matcher matcher = CONTENT_RANGE.matcher(value);
         if (!matcher.matches()) {
-            throw new IllegalStateException("Unsupported Content-Range \"" + value + "\" for " + url);
+            throw new IllegalStateException("Unsupported Content-Range for audio URL");
         }
         long start = Long.parseLong(matcher.group(1));
         long endInclusive = Long.parseLong(matcher.group(2));
         int total = matcher.group(3).equals("*") ? -1 : Math.toIntExact(Long.parseLong(matcher.group(3)));
         if (endInclusive < start || total > MAX_BUFFERED_ASSET_BYTES) {
-            throw new IllegalStateException("Unsupported Content-Range \"" + value + "\" for " + url);
+            throw new IllegalStateException("Unsupported Content-Range for audio URL");
         }
         return new ByteRange(start, endInclusive, total);
     }
 
-    private static void validateChunkLength(int actualLength, ByteRange range, String url) {
+    private static void validateChunkLength(int actualLength, ByteRange range) {
         long expectedLength = range.endInclusive() - range.start() + 1;
         if (actualLength != expectedLength) {
-            throw new IllegalStateException("Expected " + expectedLength + " bytes for " + url + " range " + range.start() + "-" + range.endInclusive() + " but got " + actualLength);
+            throw new IllegalStateException("Expected " + expectedLength + " bytes for range " + range.start() + "-" + range.endInclusive() + " but got " + actualLength);
         }
     }
 
-    private static void ensureBufferedSize(long size, String url) {
+    private static void ensureBufferedSize(long size, String context) {
         if (size > MAX_BUFFERED_ASSET_BYTES) {
-            throw new IllegalStateException("Audio asset is too large to buffer safely: " + url);
+            throw new IllegalStateException("Audio asset is too large to buffer safely: " + context);
         }
+    }
+
+    private static boolean isRedirect(int statusCode) {
+        return statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307 || statusCode == 308;
     }
 
     private record ByteRange(long start, long endInclusive, int total) {
@@ -432,21 +667,39 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 line.stop();
                 line.close();
             }
+            InputStream activeStream = handle.activeStream;
+            if (activeStream != null) {
+                try {
+                    activeStream.close();
+                } catch (java.io.IOException ignored) {
+                    // Best effort: stopping playback must not fail because a remote
+                    // server already closed or reset its response body.
+                }
+            }
             if (handle.thread != null) {
                 handle.thread.interrupt();
             }
         }
     }
 
-    private static void applyGain(SourceDataLine line, float linearGain) {
-        if (line == null) {
+    private float effectiveGain() {
+        return clamp01(serverGain * gameGain);
+    }
+
+    static void applySoftwareGain(byte[] buffer, int length, float linearGain) {
+        float clamped = clamp01(linearGain);
+        if (clamped >= 0.9999f) {
             return;
         }
-        if (line.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
-            FloatControl control = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
-            float clamped = clamp01(linearGain);
-            float decibels = clamped <= 0.0001f ? control.getMinimum() : (float) (20.0 * Math.log10(clamped));
-            control.setValue(Math.max(control.getMinimum(), Math.min(control.getMaximum(), decibels)));
+        if (clamped <= 0.0001f) {
+            Arrays.fill(buffer, 0, length, (byte) 0);
+            return;
+        }
+        for (int i = 0; i + 1 < length; i += 2) {
+            int sample = (short) ((buffer[i] & 0xFF) | (buffer[i + 1] << 8));
+            int scaled = Math.round(sample * clamped);
+            buffer[i] = (byte) (scaled & 0xFF);
+            buffer[i + 1] = (byte) ((scaled >>> 8) & 0xFF);
         }
     }
 
@@ -457,11 +710,96 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         return Math.min(value, 1.0f);
     }
 
+    private static final class TrackedInputStream extends FilterInputStream {
+        private final PlaybackHandle handle;
+        private boolean closed;
+
+        private TrackedInputStream(PlaybackHandle handle, InputStream delegate) {
+            super(delegate);
+            this.handle = handle;
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            try {
+                super.close();
+            } finally {
+                clearActiveStream(handle, this);
+            }
+        }
+    }
+
+    private static final class IcyMetadataInputStream extends FilterInputStream {
+        private final int metadataInterval;
+        private int audioBytesUntilMetadata;
+
+        private IcyMetadataInputStream(InputStream delegate, int metadataInterval) {
+            super(delegate);
+            this.metadataInterval = metadataInterval;
+            this.audioBytesUntilMetadata = metadataInterval;
+        }
+
+        @Override
+        public int read() throws java.io.IOException {
+            skipMetadataIfNeeded();
+            int value = super.read();
+            if (value != -1) {
+                audioBytesUntilMetadata--;
+            }
+            return value;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws java.io.IOException {
+            java.util.Objects.checkFromIndexSize(offset, length, buffer.length);
+            if (length == 0) {
+                return 0;
+            }
+            skipMetadataIfNeeded();
+            int read = super.read(buffer, offset, Math.min(length, audioBytesUntilMetadata));
+            if (read > 0) {
+                audioBytesUntilMetadata -= read;
+            }
+            return read;
+        }
+
+        private void skipMetadataIfNeeded() throws java.io.IOException {
+            if (audioBytesUntilMetadata != 0) {
+                return;
+            }
+            int lengthByte = super.read();
+            if (lengthByte != -1) {
+                skipFully((lengthByte & 0xFF) * 16);
+            }
+            audioBytesUntilMetadata = metadataInterval;
+        }
+
+        private void skipFully(int bytes) throws java.io.IOException {
+            int remaining = bytes;
+            while (remaining > 0) {
+                long skipped = super.skip(remaining);
+                if (skipped > 0) {
+                    remaining -= skipped;
+                    continue;
+                }
+                if (super.read() == -1) {
+                    return;
+                }
+                remaining--;
+            }
+        }
+    }
+
     private static final class PlaybackHandle {
         private final String playbackId;
         private final Duration seekOffset;
         private volatile Thread thread;
         private volatile SourceDataLine line;
+        private volatile InputStream activeStream;
         private volatile boolean paused;
         private volatile boolean stopped;
 
@@ -469,5 +807,12 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             this.playbackId = playbackId;
             this.seekOffset = seekOffset != null ? seekOffset : Duration.ZERO;
         }
+    }
+
+    enum EncodedAudioKind {
+        OPUS,
+        VORBIS,
+        MP3,
+        UNKNOWN
     }
 }

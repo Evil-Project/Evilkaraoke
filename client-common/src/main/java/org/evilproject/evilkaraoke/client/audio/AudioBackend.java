@@ -15,5 +15,9 @@ public interface AudioBackend {
     default void setVolume(float linearGain) {
     }
 
+    /** Applies the local Minecraft sound-slider gain (0..1) without restarting playback. */
+    default void setGameVolume(float linearGain) {
+    }
+
     AudioBackendStatus status();
 }

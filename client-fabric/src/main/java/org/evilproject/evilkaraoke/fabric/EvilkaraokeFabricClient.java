@@ -3,16 +3,18 @@ package org.evilproject.evilkaraoke.fabric;
 import java.util.logging.Logger;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
-import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.sounds.SoundSource;
 import org.evilproject.evilkaraoke.client.net.ClientAudioController;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.model.SoundCategory;
 import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
 
 /**
@@ -23,49 +25,107 @@ import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
  */
 public final class EvilkaraokeFabricClient implements ClientModInitializer {
     private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
-    private static final String MOD_VERSION = "0.1.0";
+    private static final int STATUS_REPORT_INTERVAL_TICKS = 20; // Report status every second
+    private static final int HELLO_RETRY_TICKS = 100;
+    private static final int HELLO_RETRY_INTERVAL_TICKS = 20;
 
     private final CustomPacketPayload.Type<EvilkaraokePayload> helloType = EvilkaraokePayload.type(EvilkaraokeProtocol.HELLO_CHANNEL);
     private final CustomPacketPayload.Type<EvilkaraokePayload> audioType = EvilkaraokePayload.type(EvilkaraokeProtocol.AUDIO_CHANNEL);
     private final CustomPacketPayload.Type<EvilkaraokePayload> statusType = EvilkaraokePayload.type(EvilkaraokeProtocol.STATUS_CHANNEL);
 
     private ClientAudioController controller;
+    private int tickCounter = 0;
+    private int helloRetryTicks = 0;
+    private int helloRetryCooldown = 0;
 
     @Override
     public void onInitializeClient() {
+        String modVersion = FabricLoader.getInstance()
+                .getModContainer("evilkaraoke")
+                .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                .orElse("unknown");
         String minecraftVersion = FabricLoader.getInstance()
                 .getModContainer("minecraft")
                 .map(container -> container.getMetadata().getVersion().getFriendlyString())
                 .orElse("unknown");
-        controller = new ClientAudioController(LOGGER, MOD_VERSION, minecraftVersion, "fabric");
+        controller = new ClientAudioController(LOGGER, modVersion, minecraftVersion, "fabric");
 
         // Show the vanilla music toast whenever a karaoke track starts playing.
         controller.setOnPlay(this::showMusicToast);
 
-        PayloadTypeRegistry.clientboundPlay().register(audioType, EvilkaraokePayload.codec(audioType));
-        PayloadTypeRegistry.serverboundPlay().register(helloType, EvilkaraokePayload.codec(helloType));
-        PayloadTypeRegistry.serverboundPlay().register(statusType, EvilkaraokePayload.codec(statusType));
-
         ClientPlayNetworking.registerGlobalReceiver(audioType, (payload, context) ->
                 context.client().execute(() -> controller.handleAudioPayload(payload.data())));
 
+        ClientTickEvents.END_CLIENT_TICK.register(this::updateMinecraftVolume);
+
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
-            // Send unconditionally — if the server is running Evilkaraoke it will
-            // handle the packet; if not, the server silently ignores unknown channels.
-            // A canSend() guard would silently drop the hello when the server's
-            // known-channels packet hasn't arrived yet, preventing audio delivery.
-            ClientPlayNetworking.send(new EvilkaraokePayload(helloType, controller.helloPayload()));
-            LOGGER.info("Sent Evilkaraoke client handshake to server.");
+            helloRetryTicks = HELLO_RETRY_TICKS;
+            helloRetryCooldown = 0;
         });
 
         // Stop audio immediately when the player leaves a server so the playback
         // thread does not outlive the play session.
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            helloRetryTicks = 0;
+            helloRetryCooldown = 0;
             controller.stopAll();
             LOGGER.info("Evilkaraoke stopped playback on server disconnect.");
         });
 
         LOGGER.info("Evilkaraoke Fabric client initialized (audio-only).");
+    }
+
+    private void updateMinecraftVolume(Minecraft client) {
+        if (client.options != null) {
+            controller.setGameVolume(client.options.getFinalSoundSourceVolume(soundSource(controller.soundCategory())));
+        }
+
+        sendPendingHello();
+
+        // Send status updates periodically while playing
+        tickCounter++;
+        if (tickCounter >= STATUS_REPORT_INTERVAL_TICKS) {
+            tickCounter = 0;
+            sendStatusUpdate();
+        }
+    }
+
+    private void sendPendingHello() {
+        if (helloRetryTicks <= 0) {
+            return;
+        }
+        helloRetryTicks--;
+        if (helloRetryCooldown > 0) {
+            helloRetryCooldown--;
+            return;
+        }
+        if (!ClientPlayNetworking.canSend(helloType)) {
+            return;
+        }
+        ClientPlayNetworking.send(new EvilkaraokePayload(helloType, controller.helloPayload()));
+        helloRetryCooldown = HELLO_RETRY_INTERVAL_TICKS;
+        LOGGER.info("Sent Evilkaraoke client handshake to server.");
+    }
+
+    private void sendStatusUpdate() {
+        if (ClientPlayNetworking.canSend(statusType)) {
+            ClientPlayNetworking.send(new EvilkaraokePayload(statusType, controller.statusPayload()));
+        }
+    }
+
+    private static SoundSource soundSource(SoundCategory category) {
+        return switch (category) {
+            case MASTER -> SoundSource.MASTER;
+            case MUSIC -> SoundSource.MUSIC;
+            case RECORD -> SoundSource.RECORDS;
+            case WEATHER -> SoundSource.WEATHER;
+            case BLOCK -> SoundSource.BLOCKS;
+            case HOSTILE -> SoundSource.HOSTILE;
+            case NEUTRAL -> SoundSource.NEUTRAL;
+            case PLAYER -> SoundSource.PLAYERS;
+            case AMBIENT -> SoundSource.AMBIENT;
+            case VOICE -> SoundSource.VOICE;
+        };
     }
 
     /**
