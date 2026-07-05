@@ -6,7 +6,7 @@ license="Apache-2.0"
 modId="evilkaraoke"
 version="${version}"
 displayName="Evilkaraoke"
-description='''Client-side Evilkaraoke audio playback for server-authoritative karaoke sessions.'''
+description='''Evilkaraoke server commands and client audio playback for server-authoritative karaoke sessions.'''
 authors="Evil-Project"
 
 [[dependencies.evilkaraoke]]
@@ -14,11 +14,11 @@ modId="neoforge"
 type="required"
 versionRange="[26.2,)"
 ordering="NONE"
-side="CLIENT"
+side="BOTH"
 
 [[dependencies.evilkaraoke]]
 modId="minecraft"
 type="required"
 versionRange="[26.2,26.3)"
 ordering="NONE"
-side="CLIENT"
+side="BOTH"

@@ -14,6 +14,10 @@ neoForge {
             client()
             jvmArgument("--sun-misc-unsafe-memory-access=allow")
         }
+        create("server") {
+            server()
+            jvmArgument("--sun-misc-unsafe-memory-access=allow")
+        }
     }
 }
 
@@ -27,8 +31,10 @@ dependencies {
     implementation(libs.vorbis.java.core)
 
     implementation(project(":common"))
+    implementation(project(":server-common"))
     implementation(project(":client-common"))
     jarJar(project(":common"))
+    jarJar(project(":server-common"))
     jarJar(project(":client-common"))
     jarJar(libs.jse.spi.opus)
     jarJar(libs.jse.spi.vorbis)

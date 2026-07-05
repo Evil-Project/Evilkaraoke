@@ -3,18 +3,26 @@
   "id": "evilkaraoke",
   "version": "${version}",
   "name": "Evilkaraoke",
-  "description": "Client-side Evilkaraoke audio playback for server-authoritative karaoke sessions.",
+  "description": "Evilkaraoke server commands and client audio playback for server-authoritative karaoke sessions.",
   "authors": ["Evil-Project"],
   "license": "Apache-2.0",
-  "environment": "client",
+  "environment": "*",
   "entrypoints": {
+    "main": [
+      "org.evilproject.evilkaraoke.fabric.EvilkaraokeFabric"
+    ],
     "client": [
       "org.evilproject.evilkaraoke.fabric.EvilkaraokeFabricClient"
     ]
   },
   "depends": {
+    "java": ">=25",
     "fabricloader": ">=0.19.3",
     "minecraft": "~26.2",
-    "fabric-api": "*"
+    "fabric-api": "*",
+    "fabric-permissions-api-v0": "*"
+  },
+  "suggests": {
+    "luckperms": "*"
   }
 }
