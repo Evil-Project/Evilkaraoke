@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 
 import org.evilproject.evilkaraoke.common.model.AudioAsset;
@@ -46,6 +47,7 @@ class KaraokeSessionTest {
         KaraokeSession session = new KaraokeSession();
         session.request(track("requested"), UUID.randomUUID(), "Steve");
         session.next();
+        session.startTimer(); // Start timer to simulate client beginning playback
         Thread.sleep(20);
         session.pause();
         Duration paused = session.offset();
@@ -67,5 +69,125 @@ class KaraokeSessionTest {
         assertEquals(PlaybackState.IDLE, session.snapshot().state());
         assertTrue(session.queuedTracks().isEmpty());
         assertTrue(session.current().isEmpty());
+    }
+
+    @Test
+    void removeAtRemovesFromRequestQueue() {
+        KaraokeSession session = new KaraokeSession();
+        UUID steveId = UUID.randomUUID();
+        session.request(track("a"), steveId, "Steve");
+        session.request(track("b"), steveId, "Steve");
+        session.request(track("c"), steveId, "Steve");
+
+        assertEquals(3, session.requestQueueSize());
+
+        // Remove position 1 (0-indexed, so track "b")
+        KaraokeSession.QueuedTrack removed = session.removeAt(1).orElseThrow();
+        assertEquals("b", removed.track().id());
+        assertEquals(2, session.requestQueueSize());
+
+        // Verify remaining tracks are correct
+        assertEquals("a", session.queuedTracks().get(0).track().id());
+        assertEquals("c", session.queuedTracks().get(1).track().id());
+    }
+
+    @Test
+    void removeAtRemovesFromRandomQueue() {
+        KaraokeSession session = new KaraokeSession();
+        session.addRandom(track("r1"));
+        session.addRandom(track("r2"));
+        session.addRandom(track("r3"));
+
+        assertEquals(3, session.randomQueueSize());
+
+        // Remove position 1 (0-indexed, so track "r2")
+        KaraokeSession.QueuedTrack removed = session.removeAt(1).orElseThrow();
+        assertEquals("r2", removed.track().id());
+        assertEquals(2, session.randomQueueSize());
+
+        // Verify remaining tracks
+        assertEquals("r1", session.queuedTracks().get(0).track().id());
+        assertEquals("r3", session.queuedTracks().get(1).track().id());
+    }
+
+    @Test
+    void removeAtHandlesMixedQueue() {
+        KaraokeSession session = new KaraokeSession();
+        UUID steveId = UUID.randomUUID();
+        session.request(track("req1"), steveId, "Steve");
+        session.request(track("req2"), steveId, "Steve");
+        session.addRandom(track("rand1"));
+        session.addRandom(track("rand2"));
+
+        // Combined queue: [req1, req2, rand1, rand2]
+        assertEquals(4, session.queuedTracks().size());
+
+        // Remove position 2 (0-indexed, so "rand1")
+        KaraokeSession.QueuedTrack removed = session.removeAt(2).orElseThrow();
+        assertEquals("rand1", removed.track().id());
+
+        // Verify queue state
+        assertEquals(2, session.requestQueueSize());
+        assertEquals(1, session.randomQueueSize());
+        assertEquals(3, session.queuedTracks().size());
+    }
+
+    @Test
+    void removeAtReturnsEmptyForInvalidPosition() {
+        KaraokeSession session = new KaraokeSession();
+        session.request(track("a"), UUID.randomUUID(), "Steve");
+
+        assertTrue(session.removeAt(-1).isEmpty());
+        assertTrue(session.removeAt(5).isEmpty());
+    }
+
+    @Test
+    void removeRequestsByRequesterRemovesOnlyThatPlayersRequests() {
+        KaraokeSession session = new KaraokeSession();
+        UUID steveId = UUID.randomUUID();
+        UUID alexId = UUID.randomUUID();
+        session.request(track("a"), steveId, "Steve");
+        session.request(track("b"), alexId, "Alex");
+        session.request(track("c"), steveId, "Steve");
+
+        List<KaraokeSession.QueuedTrack> removed = session.removeRequestsByRequester(steveId);
+
+        assertEquals(List.of("a", "c"), removed.stream().map(queued -> queued.track().id()).toList());
+        assertEquals(List.of("b"), session.queuedTracks().stream().map(queued -> queued.track().id()).toList());
+    }
+
+    @Test
+    void removeAllQueuedClearsRequestsAndRandomTracks() {
+        KaraokeSession session = new KaraokeSession();
+        session.request(track("a"), UUID.randomUUID(), "Steve");
+        session.addRandom(track("b"));
+
+        List<KaraokeSession.QueuedTrack> removed = session.removeAllQueued();
+
+        assertEquals(List.of("a", "b"), removed.stream().map(queued -> queued.track().id()).toList());
+        assertTrue(session.queuedTracks().isEmpty());
+    }
+
+    @Test
+    void moveRequestReordersRequestedQueue() {
+        KaraokeSession session = new KaraokeSession();
+        UUID steveId = UUID.randomUUID();
+        session.request(track("a"), steveId, "Steve");
+        session.request(track("b"), steveId, "Steve");
+        session.request(track("c"), steveId, "Steve");
+
+        KaraokeSession.QueuedTrack moved = session.moveRequest(2, 0).orElseThrow();
+
+        assertEquals("c", moved.track().id());
+        assertEquals(List.of("c", "a", "b"), session.queuedTracks().stream().map(queued -> queued.track().id()).toList());
+    }
+
+    @Test
+    void moveRequestRejectsInvalidPositions() {
+        KaraokeSession session = new KaraokeSession();
+        session.request(track("a"), UUID.randomUUID(), "Steve");
+
+        assertTrue(session.moveRequest(-1, 0).isEmpty());
+        assertTrue(session.moveRequest(0, 2).isEmpty());
     }
 }

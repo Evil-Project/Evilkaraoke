@@ -60,7 +60,15 @@ public final class StatsCommand {
         }
         var target = org.bukkit.Bukkit.getOfflinePlayerIfCached(args[2]);
         if (target == null) {
-            sender.sendMessage(Component.text("Unknown player: " + args[2], NamedTextColor.RED));
+            UserStats stats = statsService.findUserByName(args[2]).orElse(null);
+            if (stats == null) {
+                sender.sendMessage(Component.text("Unknown player: " + args[2], NamedTextColor.RED));
+                return true;
+            }
+            sender.sendMessage(Component.text("Evilkaraoke stats for " + stats.playerName(), NamedTextColor.GOLD));
+            sender.sendMessage(Component.text("Listen time: " + stats.listenSeconds() + "s", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("Songs listened: " + stats.songsListened(), NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("Songs requested: " + stats.songsRequested(), NamedTextColor.GRAY));
             return true;
         }
         UserStats stats = statsService.user(target.getUniqueId(), args[2]);

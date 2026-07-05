@@ -20,7 +20,7 @@ public record EvilkaraokeConfig(
     public static EvilkaraokeConfig from(FileConfiguration config) {
         return new EvilkaraokeConfig(
                 config.getString("playback.defaultTargets", "@a"),
-                config.getString("playback.defaultSource", "music"),
+                config.getString("playback.defaultSource", "record"),
                 (float) config.getDouble("playback.defaultVolume", 1.0D),
                 (float) config.getDouble("playback.defaultPitch", 1.0D),
                 (float) config.getDouble("playback.defaultMinVolume", 0.0D),

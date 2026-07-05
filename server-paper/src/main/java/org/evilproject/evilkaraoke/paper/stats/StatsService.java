@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -94,6 +95,15 @@ public final class StatsService {
 
     public UserStats user(UUID playerId, String playerName) {
         return users.getOrDefault(playerId, new UserStats(playerId, playerName, 0, 0, 0));
+    }
+
+    public Optional<UserStats> findUserByName(String playerName) {
+        if (playerName == null || playerName.isBlank()) {
+            return Optional.empty();
+        }
+        return users.values().stream()
+                .filter(user -> user.playerName() != null && user.playerName().equalsIgnoreCase(playerName))
+                .findFirst();
     }
 
     public List<UserStats> topUsersByTime(int limit) {

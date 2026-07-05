@@ -1,6 +1,7 @@
 package org.evilproject.evilkaraoke.paper.stats;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -47,5 +48,18 @@ class StatsServiceTest {
         StatsService second = new StatsService(logger, file);
         second.load();
         assertEquals(90, second.user(alice, "Alice").listenSeconds());
+    }
+
+    @Test
+    void findsStoredUserStatsByNameIgnoringCase(@TempDir Path dir) {
+        StatsService service = new StatsService(logger, dir.resolve("stats.json"));
+        UUID alex = UUID.randomUUID();
+
+        service.recordRequest(alex, "Alex", "song-1", "First");
+
+        UserStats stats = service.findUserByName("alex").orElseThrow();
+        assertEquals(alex, stats.playerId());
+        assertEquals(1, stats.songsRequested());
+        assertTrue(service.findUserByName("missing").isEmpty());
     }
 }

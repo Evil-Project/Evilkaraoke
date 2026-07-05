@@ -80,7 +80,7 @@ public final class EvilkaraokePlugin extends JavaPlugin {
 
     private void registerCommands(PermissionService permissionService) {
         command = new EvilkaraokeCommand(this, clientRegistry, coordinator, neurokaraokeClient, statsService, config, permissionService, this::reloadEvilkaraokeConfig);
-        PluginCommand pluginCommand = Objects.requireNonNull(getCommand("evilkaraoke"), "evilkaraoke command missing from plugin.yml");
+        PluginCommand pluginCommand = Objects.requireNonNull(getCommand("ek"), "ek command missing from plugin.yml");
         pluginCommand.setExecutor(command);
         pluginCommand.setTabCompleter(command);
     }

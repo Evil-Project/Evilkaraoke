@@ -58,9 +58,21 @@ public final class KaraokeSession {
             return Optional.empty();
         }
         state = PlaybackState.PLAYING;
-        startedAt = Instant.now();
+        // Don't start the timer yet - wait for client confirmation via startTimer()
+        startedAt = null;
         pausedOffset = Duration.ZERO;
         return Optional.of(next);
+    }
+
+    /**
+     * Starts the playback timer. Called by the coordinator when the first client
+     * reports PLAYING status, ensuring the timer reflects actual playback time
+     * rather than including the client's buffering delay.
+     */
+    public synchronized void startTimer() {
+        if (state == PlaybackState.PLAYING && startedAt == null) {
+            startedAt = Instant.now();
+        }
     }
 
     /**
@@ -79,13 +91,14 @@ public final class KaraokeSession {
         QueuedTrack prev = history.removeLast();
         current = prev;
         state = PlaybackState.PLAYING;
-        startedAt = Instant.now();
+        // Don't start the timer yet - wait for client confirmation via startTimer()
+        startedAt = null;
         pausedOffset = Duration.ZERO;
         return Optional.of(prev);
     }
 
     public synchronized void pause() {
-        if (state == PlaybackState.PLAYING && startedAt != null) {
+        if (state == PlaybackState.PLAYING) {
             pausedOffset = offset();
             state = PlaybackState.PAUSED;
         }
@@ -93,8 +106,13 @@ public final class KaraokeSession {
 
     public synchronized void resume() {
         if (state == PlaybackState.PAUSED) {
-            startedAt = Instant.now().minus(pausedOffset);
-            state = PlaybackState.PLAYING;
+            if (startedAt == null) {
+                // Timer hasn't started yet (client still buffering) - just change state
+                state = PlaybackState.PLAYING;
+            } else {
+                startedAt = Instant.now().minus(pausedOffset);
+                state = PlaybackState.PLAYING;
+            }
         }
     }
 
@@ -149,6 +167,76 @@ public final class KaraokeSession {
         List<QueuedTrack> all = new ArrayList<>(requests);
         all.addAll(randomTracks);
         return all;
+    }
+
+    /**
+     * Removes a track from the queue at the given position (0-indexed).
+     * Returns the removed track if successful, empty otherwise.
+     */
+    public synchronized Optional<QueuedTrack> removeAt(int position) {
+        List<QueuedTrack> all = new ArrayList<>(requests);
+        all.addAll(randomTracks);
+
+        if (position < 0 || position >= all.size()) {
+            return Optional.empty();
+        }
+
+        QueuedTrack removed = all.get(position);
+
+        // Remove from the appropriate queue
+        if (position < requests.size()) {
+            // It's in the requests queue
+            List<QueuedTrack> requestsList = new ArrayList<>(requests);
+            requestsList.remove(position);
+            requests.clear();
+            requests.addAll(requestsList);
+        } else {
+            // It's in the random tracks queue
+            int randomIndex = position - requests.size();
+            List<QueuedTrack> randomList = new ArrayList<>(randomTracks);
+            randomList.remove(randomIndex);
+            randomTracks.clear();
+            randomTracks.addAll(randomList);
+        }
+
+        return Optional.of(removed);
+    }
+
+    public synchronized List<QueuedTrack> removeAllQueued() {
+        List<QueuedTrack> removed = queuedTracks();
+        requests.clear();
+        randomTracks.clear();
+        return removed;
+    }
+
+    public synchronized List<QueuedTrack> removeRequestsByRequester(UUID requester) {
+        if (requester == null) {
+            return List.of();
+        }
+        List<QueuedTrack> removed = new ArrayList<>();
+        List<QueuedTrack> remaining = new ArrayList<>();
+        for (QueuedTrack queued : requests) {
+            if (requester.equals(queued.requester())) {
+                removed.add(queued);
+            } else {
+                remaining.add(queued);
+            }
+        }
+        requests.clear();
+        requests.addAll(remaining);
+        return removed;
+    }
+
+    public synchronized Optional<QueuedTrack> moveRequest(int fromPosition, int toPosition) {
+        List<QueuedTrack> requestList = new ArrayList<>(requests);
+        if (fromPosition < 0 || fromPosition >= requestList.size() || toPosition < 0 || toPosition >= requestList.size()) {
+            return Optional.empty();
+        }
+        QueuedTrack moved = requestList.remove(fromPosition);
+        requestList.add(toPosition, moved);
+        requests.clear();
+        requests.addAll(requestList);
+        return Optional.of(moved);
     }
 
     public synchronized PlaybackState state() {

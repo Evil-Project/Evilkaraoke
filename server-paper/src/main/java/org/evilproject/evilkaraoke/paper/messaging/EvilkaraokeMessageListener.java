@@ -8,6 +8,7 @@ import org.bukkit.plugin.messaging.PluginMessageListener;
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
 import org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket;
+import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.common.protocol.EvilkaraokeProtocol;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.jetbrains.annotations.NotNull;
@@ -41,6 +42,8 @@ public final class EvilkaraokeMessageListener implements PluginMessageListener {
                 // Delay sync by 1 tick so the client's incoming channel is fully
                 // established before the PLAY packet arrives.
                 plugin.getServer().getScheduler().runTaskLater(plugin, () -> coordinator.syncPlayer(player), 1L);
+            } else if (packet instanceof ClientStatusPacket status) {
+                coordinator.handleClientStatus(player.getUniqueId(), status);
             }
         } catch (PacketCodecException | IllegalArgumentException ex) {
             plugin.getLogger().log(Level.WARNING, "Ignoring invalid Evilkaraoke packet from " + player.getName(), ex);

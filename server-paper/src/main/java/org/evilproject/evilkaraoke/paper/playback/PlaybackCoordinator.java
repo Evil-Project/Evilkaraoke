@@ -4,8 +4,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -19,6 +21,8 @@ import org.evilproject.evilkaraoke.common.model.SoundCategory;
 import org.evilproject.evilkaraoke.common.model.TargetMode;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
+import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
+import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.paper.config.EvilkaraokeConfig;
 import org.evilproject.evilkaraoke.paper.messaging.ClientRegistry;
@@ -26,6 +30,9 @@ import org.evilproject.evilkaraoke.paper.messaging.PlaybackMessenger;
 import org.evilproject.evilkaraoke.paper.queue.KaraokeSession;
 
 public final class PlaybackCoordinator {
+    private static final long BUFFER_TIME_SECONDS = 10L; // Extra time to account for client buffering
+    private static final long CLIENT_START_TIMEOUT_SECONDS = 10L;
+
     private final Plugin plugin;
     private final ClientRegistry clientRegistry;
     private final PlaybackMessenger messenger;
@@ -37,6 +44,11 @@ public final class PlaybackCoordinator {
     private TargetMode audienceMode = TargetMode.ALL;
     private UUID audiencePlayer;
     private String audienceLabel = "@a";
+
+    /** Tracks the current playback ID and which clients have started playing */
+    private String currentPlaybackId = null;
+    private final Map<UUID, ClientPlaybackState> clientStates = new HashMap<>();
+    private boolean timerStarted = false;
 
     public PlaybackCoordinator(Plugin plugin, ClientRegistry clientRegistry, PlaybackMessenger messenger, NeurokaraokeClient neurokaraokeClient, EvilkaraokeConfig config) {
         this.plugin = plugin;
@@ -94,30 +106,56 @@ public final class PlaybackCoordinator {
     }
 
     public void playNext() {
-        session.next().ifPresentOrElse(queued -> {
-            String playbackId = UUID.randomUUID().toString();
-            AudioCommandPacket packet = new AudioCommandPacket(
-                    AudioCommandType.PLAY,
-                    KaraokeSession.GLOBAL_SESSION_ID,
-                    playbackId,
-                    queued.track(),
-                    audienceTarget(),
-                    Duration.ZERO,
-                    Instant.now(),
-                    "",
-                    Duration.ZERO);
-            broadcast(packet);
-            scheduleAutoAdvance(queued.track());
-        }, () -> plugin.getLogger().fine("Evilkaraoke queue is empty."));
+        session.next().ifPresentOrElse(
+                queued -> beginPlayback(queued, ""),
+                () -> {
+                    clearPlaybackTracking();
+                    plugin.getLogger().fine("Evilkaraoke queue is empty.");
+                });
+    }
+
+    private void beginPlayback(KaraokeSession.QueuedTrack queued, String reason) {
+        currentPlaybackId = UUID.randomUUID().toString();
+        clientStates.clear();
+        timerStarted = false;
+        AudioCommandPacket packet = new AudioCommandPacket(
+                AudioCommandType.PLAY,
+                KaraokeSession.GLOBAL_SESSION_ID,
+                currentPlaybackId,
+                queued.track(),
+                audienceTarget(),
+                Duration.ZERO,
+                Instant.now(),
+                reason,
+                Duration.ZERO);
+        broadcast(packet);
+        schedulePlaybackStartFallback(queued.track(), currentPlaybackId);
+    }
+
+    private void clearPlaybackTracking() {
+        cancelAutoAdvance();
+        currentPlaybackId = null;
+        clientStates.clear();
+        timerStarted = false;
     }
 
     public void pause() {
         session.pause();
+        cancelAutoAdvance();
         broadcastControl(AudioCommandType.PAUSE, "pause");
     }
 
     public void resume() {
         session.resume();
+        if (currentPlaybackId != null) {
+            session.current().ifPresent(current -> {
+                if (timerStarted) {
+                    scheduleAutoAdvance(current.track(), currentPlaybackId);
+                } else {
+                    schedulePlaybackStartFallback(current.track(), currentPlaybackId);
+                }
+            });
+        }
         broadcastControl(AudioCommandType.RESUME, "resume");
     }
 
@@ -127,28 +165,54 @@ public final class PlaybackCoordinator {
     }
 
     public void previous() {
-        session.previous().ifPresentOrElse(queued -> {
-            cancelAutoAdvance();
-            String playbackId = UUID.randomUUID().toString();
-            AudioCommandPacket packet = new AudioCommandPacket(
-                    AudioCommandType.PLAY,
-                    KaraokeSession.GLOBAL_SESSION_ID,
-                    playbackId,
-                    queued.track(),
-                    audienceTarget(),
-                    Duration.ZERO,
-                    Instant.now(),
-                    "previous",
-                    Duration.ZERO);
-            broadcast(packet);
-            scheduleAutoAdvance(queued.track());
-        }, () -> plugin.getLogger().fine("No previous track in history."));
+        session.previous().ifPresentOrElse(
+                queued -> beginPlayback(queued, "previous"),
+                () -> plugin.getLogger().fine("No previous track in history."));
     }
 
     public void stop() {
         session.stop();
-        cancelAutoAdvance();
+        clearPlaybackTracking();
         broadcastControl(AudioCommandType.STOP, "stop");
+    }
+
+    /**
+     * Handles a status update from a client. When the first client transitions to
+     * PLAYING state, starts the session timer so auto-advance happens relative to
+     * actual playback rather than the buffering phase.
+     */
+    public void handleClientStatus(UUID playerId, ClientStatusPacket status) {
+        if (currentPlaybackId == null || !currentPlaybackId.equals(status.playbackId())) {
+            return;
+        }
+
+        clientStates.put(playerId, status.state());
+
+        if (status.state() == ClientPlaybackState.STOPPED && session.snapshot().state() == PlaybackState.PLAYING) {
+            playNext();
+            return;
+        }
+
+        // Start the session timer when the first client actually begins playing.
+        if (!timerStarted && status.state() == ClientPlaybackState.PLAYING) {
+            session.current().ifPresent(current ->
+                    startPlaybackTimer(current.track(), status.playbackId(), "client " + playerId + " began playing"));
+        }
+    }
+
+    private void startPlaybackTimer(KaraokeTrack track, String playbackId, String reason) {
+        KaraokeSession.PlaybackSnapshot snapshot = session.snapshot();
+        if (timerStarted
+                || currentPlaybackId == null
+                || !currentPlaybackId.equals(playbackId)
+                || snapshot.current() == null
+                || snapshot.state() != PlaybackState.PLAYING) {
+            return;
+        }
+        timerStarted = true;
+        session.startTimer();
+        scheduleAutoAdvance(track, playbackId);
+        plugin.getLogger().fine("Started playback timer after " + reason);
     }
 
     /**
@@ -161,14 +225,13 @@ public final class PlaybackCoordinator {
      */
     public void syncPlayer(Player player) {
         KaraokeSession.PlaybackSnapshot snapshot = session.snapshot();
-        if (snapshot.current() == null || snapshot.state() != PlaybackState.PLAYING) {
+        if (snapshot.current() == null || snapshot.state() != PlaybackState.PLAYING || currentPlaybackId == null) {
             return;
         }
-        String playbackId = snapshot.current().track().id();
         AudioCommandPacket packet = new AudioCommandPacket(
                 AudioCommandType.PLAY,
                 KaraokeSession.GLOBAL_SESSION_ID,
-                playbackId,
+                currentPlaybackId,
                 snapshot.current().track(),
                 audienceTarget(),
                 snapshot.offset(),
@@ -202,6 +265,26 @@ public final class PlaybackCoordinator {
         return session.queuedTracks();
     }
 
+    /**
+     * Removes a track from the queue at the given position (1-indexed for user display).
+     * Returns the removed track if successful, empty otherwise.
+     */
+    public java.util.Optional<KaraokeSession.QueuedTrack> cancelAt(int position) {
+        return session.removeAt(position - 1);
+    }
+
+    public List<KaraokeSession.QueuedTrack> cancelAll() {
+        return session.removeAllQueued();
+    }
+
+    public List<KaraokeSession.QueuedTrack> cancelAllByRequester(UUID requester) {
+        return session.removeRequestsByRequester(requester);
+    }
+
+    public java.util.Optional<KaraokeSession.QueuedTrack> moveRequest(int fromPosition, int toPosition) {
+        return session.moveRequest(fromPosition - 1, toPosition - 1);
+    }
+
     private PlaybackTarget audienceTarget() {
         String selector = audienceMode == TargetMode.PLAYER && audiencePlayer != null ? audiencePlayer.toString() : audienceLabel;
         return new PlaybackTarget(
@@ -224,7 +307,7 @@ public final class PlaybackCoordinator {
 
     private void broadcastControl(AudioCommandType type, String reason) {
         KaraokeSession.PlaybackSnapshot snapshot = session.snapshot();
-        String playbackId = snapshot.current() == null ? "none" : snapshot.current().track().id();
+        String playbackId = currentPlaybackId == null ? "none" : currentPlaybackId;
         broadcast(new AudioCommandPacket(
                 type,
                 KaraokeSession.GLOBAL_SESSION_ID,
@@ -253,10 +336,31 @@ public final class PlaybackCoordinator {
         return new ArrayList<>(Bukkit.getOnlinePlayers());
     }
 
-    private void scheduleAutoAdvance(KaraokeTrack track) {
+    private void schedulePlaybackStartFallback(KaraokeTrack track, String playbackId) {
         cancelAutoAdvance();
-        track.finiteDuration().ifPresent(duration ->
-                autoAdvanceTask = Bukkit.getScheduler().runTaskLater(plugin, this::playNext, Math.max(1L, duration.toSeconds() * 20L)).getTaskId());
+        autoAdvanceTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (currentPlaybackId != null && currentPlaybackId.equals(playbackId) && !timerStarted) {
+                startPlaybackTimer(track, playbackId, "client start timeout");
+            }
+        }, Math.max(1L, CLIENT_START_TIMEOUT_SECONDS * 20L)).getTaskId();
+    }
+
+    private void scheduleAutoAdvance(KaraokeTrack track, String playbackId) {
+        cancelAutoAdvance();
+        track.finiteDuration().ifPresent(duration -> {
+            Duration remaining = duration.minus(session.snapshot().offset()).plus(Duration.ofSeconds(BUFFER_TIME_SECONDS));
+            long delayTicks = ticksCeil(remaining);
+            autoAdvanceTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                if (currentPlaybackId != null && currentPlaybackId.equals(playbackId)) {
+                    playNext();
+                }
+            }, delayTicks).getTaskId();
+        });
+    }
+
+    private static long ticksCeil(Duration duration) {
+        long millis = Math.max(1L, duration.toMillis());
+        return Math.max(1L, (millis + 49L) / 50L);
     }
 
     private void cancelAutoAdvance() {

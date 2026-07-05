@@ -6,13 +6,15 @@ api:
   searchUrl: "https://api.neurokaraoke.com/api/songs"
   songUrl: "https://api.neurokaraoke.com/api/songs/"
   playlistUrl: "https://api.neurokaraoke.com/api/playlist/"
+  publicPlaylistUrl: "https://api.neurokaraoke.com/api/playlist/public"
+  publicPlaylistDetailUrl: "https://idk.neurokaraoke.com/public/playlist/"
   artistUrl: "https://api.neurokaraoke.com/api/artist/"
   audioBaseUrl: "https://audio.neurokaraoke.com/"
   imagesBaseUrl: "https://images.neurokaraoke.com"
 
 playback:
   defaultTargets: "@a"
-  defaultSource: "music"
+  defaultSource: "record"
   defaultVolume: 1.0
   defaultPitch: 1.0
   defaultMinVolume: 0.0

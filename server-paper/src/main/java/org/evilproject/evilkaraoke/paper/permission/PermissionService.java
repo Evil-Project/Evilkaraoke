@@ -49,14 +49,6 @@ public final class PermissionService {
         return hook != null ? hook.getGroup(player) : "default";
     }
 
-    /**
-     * Returns the integer value of a LuckPerms meta key for the player,
-     * or {@code defaultValue} if LuckPerms is unavailable, the key is absent, or parsing fails.
-     */
-    public int getMetaInt(Player player, String key, int defaultValue) {
-        return hook != null ? hook.getMetaInt(player, key, defaultValue) : defaultValue;
-    }
-
     /** Returns true if LuckPerms integration is active. */
     public boolean isLuckPermsEnabled() {
         return hook != null;

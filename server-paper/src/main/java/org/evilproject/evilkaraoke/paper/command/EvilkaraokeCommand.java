@@ -19,7 +19,10 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.model.UserAudioTracks;
+import org.evilproject.evilkaraoke.common.security.AudioUrlValidator;
 import org.evilproject.evilkaraoke.common.util.DurationFormatter;
+import org.evilproject.evilkaraoke.paper.api.NeurokaraokeApiUnavailableException;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeSetlist;
 import org.evilproject.evilkaraoke.paper.config.EvilkaraokeConfig;
@@ -34,9 +37,10 @@ import org.jetbrains.annotations.Nullable;
 public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     private static final int CHAT_PAGE_SIZE = 5;
 
-    private static final List<String> ROOT_SUBCOMMANDS = List.of(
-            "help", "commands", "doctor", "listeners", "reload", "randomsong", "request", "search",
-            "playlist", "setlist", "radio", "current", "previous", "next", "queue", "pause", "resume", "skip", "stop", "audience", "stats", "issue"
+    private static final List<String> CANONICAL_ROOT_SUBCOMMANDS = List.of(
+            "help", "doctor", "listeners", "reload", "randomsong", "request", "search",
+            "setlist", "playlist", "radio", "current", "previous", "queue", "cancel", "pause", "resume",
+            "next", "stop", "audience", "stats", "issue"
     );
 
     private final Plugin plugin;
@@ -70,9 +74,9 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
 
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, String @NotNull [] args) {
-        String subcommand = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
+        String subcommand = args.length == 0 ? "help" : canonicalSubcommand(args[0]);
         return switch (subcommand) {
-            case "help", "commands" -> help(sender, label);
+            case "help" -> help(sender, label);
             case "doctor" -> doctor(sender);
             case "listeners" -> listeners(sender);
             case "reload" -> reload(sender);
@@ -81,19 +85,24 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
             case "search" -> search(sender, args, label);
             case "radio" -> radio(sender, args);
             case "current" -> current(sender);
-            case "previous" -> previous(sender);
-            case "next" -> next(sender);
+            case "previous" -> control(sender, "previous");
+            case "next" -> control(sender, "next");
             case "queue" -> queue(sender, args, label);
+            case "cancel" -> cancel(sender, args);
             case "pause" -> control(sender, "pause");
             case "resume" -> control(sender, "resume");
-            case "skip" -> control(sender, "skip");
             case "stop" -> control(sender, "stop");
             case "audience" -> audience(sender, args);
             case "stats" -> statsCommand.handle(sender, args);
             case "issue" -> issue(sender);
-            case "playlist", "setlist" -> collections(sender, args, subcommand, label);
+            case "setlist" -> setlist(sender, args, label);
+            case "playlist" -> playlist(sender, args, label);
             default -> unknown(sender);
         };
+    }
+
+    private static String canonicalSubcommand(String value) {
+        return value.toLowerCase(Locale.ROOT);
     }
 
     private boolean help(CommandSender sender, String label) {
@@ -101,13 +110,17 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
             return deny(sender);
         }
         sender.sendMessage(Component.text("Evilkaraoke commands", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("/" + label + " request <query> - request a song", NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("/" + label + " request id <songId> - request by id", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " request <query> - search and request a song", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " request id <songId> - request by song id", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " request url <https://...> [title] - request a direct audio URL", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " search <query> - search Neurokaraoke", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " setlist [page] - list Neurokaraoke setlists", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " playlist [page] - list public Neurokaraoke playlists", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " randomsong - queue a random song", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " queue|current - inspect playback", NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("/" + label + " previous|next|skip - navigate tracks (permission-gated)", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " cancel <position|all> - remove queued song(s)", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " queue move <from> <to> - reorder your queued songs", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " previous|next - navigate tracks (permission-gated)", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " pause|resume|stop - controls (permission-gated)", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " audience <@a|@s|player> - choose who hears playback (/playsound-style)", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " radio <radio21|swarmfm> - start radio", NamedTextColor.YELLOW));
@@ -154,20 +167,11 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         if (!requirePlayer(sender)) {
             return true;
         }
-        if (!sender.hasPermission("evilkaraoke.command.request")) {
-            return deny(sender);
-        }
         Player player = (Player) sender;
-        maybeWarnClient(player);
-        // Check per-player request limit via LuckPerms meta (key: "evilkaraoke.request-limit", default: 5)
-        int limit = permissionService.getMetaInt(player, "evilkaraoke.request-limit", 5);
-        long playerQueueCount = coordinator.queue().stream()
-                .filter(q -> q.requesterName().equalsIgnoreCase(player.getName()))
-                .count();
-        if (playerQueueCount >= limit) {
-            player.sendMessage(Component.text("You already have " + playerQueueCount + " song(s) queued (limit: " + limit + ").", NamedTextColor.RED));
+        if (!canRequest(player)) {
             return true;
         }
+        maybeWarnClient(player);
         async(coordinator.requestRandom(player), track -> {
             statsService.recordRequest(player.getUniqueId(), player.getName(), track.id(), track.title());
             player.sendMessage(Component.text("Queued random song: " + track.title() + " - " + track.artist(), NamedTextColor.GREEN));
@@ -179,25 +183,20 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         if (!requirePlayer(sender)) {
             return true;
         }
-        if (!sender.hasPermission("evilkaraoke.command.request")) {
-            return deny(sender);
-        }
         if (args.length < 2) {
-            sender.sendMessage(Component.text("Usage: /ek request <query> or /ek request id <songId>", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("Usage: /ek request <query> | /ek request id <songId> | /ek request url <https://...> [title]", NamedTextColor.YELLOW));
             return true;
         }
         Player player = (Player) sender;
-        maybeWarnClient(player);
-        // Check per-player request limit via LuckPerms meta (key: "evilkaraoke.request-limit", default: 5)
-        int limit = permissionService.getMetaInt(player, "evilkaraoke.request-limit", 5);
-        long playerQueueCount = coordinator.queue().stream()
-                .filter(q -> q.requesterName().equalsIgnoreCase(player.getName()))
-                .count();
-        if (playerQueueCount >= limit) {
-            player.sendMessage(Component.text("You already have " + playerQueueCount + " song(s) queued (limit: " + limit + ").", NamedTextColor.RED));
+        if (!canRequest(player)) {
             return true;
         }
-        if ("id".equalsIgnoreCase(args[1]) && args.length >= 3) {
+        maybeWarnClient(player);
+        if (isSongIdMode(args[1])) {
+            if (args.length < 3) {
+                sender.sendMessage(Component.text("Usage: /ek request id <songId>", NamedTextColor.YELLOW));
+                return true;
+            }
             String songId = args[2];
             async(neurokaraokeClient.song(songId).thenCompose(track -> coordinator.request(track, player).thenApply(ignored -> track)),
                     track -> {
@@ -207,6 +206,16 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
                     error -> player.sendMessage(ChatMessages.error("Could not request that song id", error)));
             return true;
         }
+        if ("url".equalsIgnoreCase(args[1])) {
+            if (args.length < 3) {
+                sender.sendMessage(Component.text("Usage: /ek request url <https://...> [title]", NamedTextColor.YELLOW));
+                return true;
+            }
+            return requestUrl(player, args[2], joinTail(args, 3));
+        }
+        if (AudioUrlValidator.hasHttpScheme(args[1])) {
+            return requestUrl(player, args[1], joinTail(args, 2));
+        }
         String query = String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length));
         async(coordinator.requestSearch(query, player),
                 track -> {
@@ -214,6 +223,26 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
                     player.sendMessage(Component.text("Queued: " + track.title() + " - " + track.artist(), NamedTextColor.GREEN));
                 },
                 error -> player.sendMessage(ChatMessages.error("No match for \"" + query + "\"", error)));
+        return true;
+    }
+
+    private boolean requestUrl(Player player, String rawUrl, String title) {
+        CompletableFuture<KaraokeTrack> future = CompletableFuture.supplyAsync(() -> UserAudioTracks.fromUrl(rawUrl, title))
+                .thenCompose(track -> coordinator.request(track, player).thenApply(ignored -> track));
+        async(future,
+                track -> {
+                    statsService.recordRequest(player.getUniqueId(), player.getName(), track.id(), track.title());
+                    player.sendMessage(Component.text("Queued URL: " + track.title() + " - " + track.artist(), NamedTextColor.GREEN));
+                },
+                error -> player.sendMessage(ChatMessages.error("Could not request that URL", error)));
+        return true;
+    }
+
+    private boolean canRequest(Player player) {
+        if (!player.hasPermission("evilkaraoke.command.request")) {
+            deny(player);
+            return false;
+        }
         return true;
     }
 
@@ -226,16 +255,27 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         SearchRequest searchRequest = parseSearchRequest(args);
-        async(neurokaraokeClient.search(searchRequest.query(), searchRequest.page() - 1, CHAT_PAGE_SIZE),
-                results -> {
-                    if (results.isEmpty()) {
+        async(searchPage(searchRequest),
+                page -> {
+                    if (page.results().isEmpty()) {
                         sender.sendMessage(Component.text("No Neurokaraoke results for \"" + searchRequest.query() + "\".", NamedTextColor.YELLOW));
                         return;
                     }
-                    searchMessages(searchRequest.query(), searchRequest.page(), results, label).forEach(sender::sendMessage);
+                    searchMessages(searchRequest.query(), searchRequest.page(), page.results(), label, page.hasNextPage()).forEach(sender::sendMessage);
                 },
                 error -> sender.sendMessage(ChatMessages.error("Search failed", error)));
         return true;
+    }
+
+    private CompletableFuture<SearchPage> searchPage(SearchRequest request) {
+        return neurokaraokeClient.search(request.query(), request.page() - 1, CHAT_PAGE_SIZE)
+                .thenCompose(results -> {
+                    if (results.size() < CHAT_PAGE_SIZE) {
+                        return CompletableFuture.completedFuture(new SearchPage(results, false));
+                    }
+                    return neurokaraokeClient.search(request.query(), request.page(), CHAT_PAGE_SIZE)
+                            .thenApply(nextResults -> new SearchPage(results, !nextResults.isEmpty()));
+                });
     }
 
     private boolean radio(CommandSender sender, String[] args) {
@@ -277,30 +317,127 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         return true;
     }
 
-    private boolean next(CommandSender sender) {
-        if (!sender.hasPermission("evilkaraoke.playback.skip")) {
-            return deny(sender);
-        }
-        coordinator.skip();
-        sender.sendMessage(Component.text("Skipping to next track.", NamedTextColor.GREEN));
-        return true;
-    }
-
-    private boolean previous(CommandSender sender) {
-        if (!sender.hasPermission("evilkaraoke.playback.skip")) {
-            return deny(sender);
-        }
-        coordinator.previous();
-        sender.sendMessage(Component.text("Going back to previous track.", NamedTextColor.GREEN));
-        return true;
-    }
-
     private boolean queue(CommandSender sender, String[] args, String label) {
         if (!sender.hasPermission("evilkaraoke.command.queue")) {
             return deny(sender);
         }
+        if (args.length >= 2 && "move".equalsIgnoreCase(args[1])) {
+            return moveQueue(sender, args);
+        }
         KaraokeSession.PlaybackSnapshot snapshot = coordinator.snapshot();
-        queueMessages(snapshot, parsePage(args), "Queue", label).forEach(sender::sendMessage);
+        queueMessages(sender, snapshot, parsePage(args), "Queue", label).forEach(sender::sendMessage);
+        return true;
+    }
+
+    private boolean moveQueue(CommandSender sender, String[] args) {
+        if (!requirePlayer(sender)) {
+            return true;
+        }
+        if (args.length < 4) {
+            sender.sendMessage(Component.text("Usage: /ek queue move <from> <to>", NamedTextColor.YELLOW));
+            return true;
+        }
+        int from = parseRawInt(args[2], -1);
+        int to = parseRawInt(args[3], -1);
+        if (from < 1 || to < 1) {
+            sender.sendMessage(Component.text("Queue positions must be positive numbers.", NamedTextColor.RED));
+            return true;
+        }
+        if (from == to) {
+            sender.sendMessage(Component.text("That song is already at position " + to + ".", NamedTextColor.YELLOW));
+            return true;
+        }
+        List<KaraokeSession.QueuedTrack> requests = coordinator.snapshot().requests();
+        if (from > requests.size() || to > requests.size()) {
+            sender.sendMessage(Component.text("Only requested songs can be reordered. Requested queue has " + requests.size() + " song(s).", NamedTextColor.RED));
+            return true;
+        }
+        if (!canMoveRequestedRange(sender, requests, from - 1, to - 1)) {
+            sender.sendMessage(Component.text("You can only reorder your own queued songs.", NamedTextColor.RED));
+            return true;
+        }
+        coordinator.moveRequest(from, to).ifPresentOrElse(
+                moved -> sender.sendMessage(Component.text("Moved: " + moved.track().title() + " from " + from + " to " + to + ".", NamedTextColor.GREEN)),
+                () -> sender.sendMessage(Component.text("Could not move that queued song.", NamedTextColor.RED)));
+        return true;
+    }
+
+    private boolean cancel(CommandSender sender, String[] args) {
+        if (!requirePlayer(sender)) {
+            return true;
+        }
+        if (!sender.hasPermission("evilkaraoke.command.cancel")) {
+            return deny(sender);
+        }
+        if (args.length < 2) {
+            sender.sendMessage(Component.text("Usage: /ek cancel <position|all>", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("Use /ek queue to see song positions.", NamedTextColor.GRAY));
+            return true;
+        }
+
+        Player player = (Player) sender;
+        if ("all".equalsIgnoreCase(args[1])) {
+            return cancelAll(sender, player);
+        }
+
+        int position;
+        try {
+            position = Integer.parseInt(args[1]);
+        } catch (NumberFormatException e) {
+            sender.sendMessage(Component.text("Invalid position. Must be a number.", NamedTextColor.RED));
+            return true;
+        }
+
+        if (position < 1) {
+            sender.sendMessage(Component.text("Position must be 1 or greater.", NamedTextColor.RED));
+            return true;
+        }
+
+        // Get the track before removing it to check permissions and show info
+        List<KaraokeSession.QueuedTrack> queue = new ArrayList<>(coordinator.queue());
+        if (position > queue.size()) {
+            sender.sendMessage(Component.text("Position " + position + " is out of range. Queue has " + queue.size() + " song(s).", NamedTextColor.RED));
+            return true;
+        }
+
+        KaraokeSession.QueuedTrack trackToRemove = queue.get(position - 1);
+
+        // Check permission: users can only cancel their own songs unless they have admin permission
+        boolean isAdmin = sender.hasPermission("evilkaraoke.admin.cancel");
+        boolean isOwnSong = trackToRemove.requester() != null && trackToRemove.requester().equals(player.getUniqueId());
+
+        if (!isAdmin && !isOwnSong) {
+            sender.sendMessage(Component.text("You can only cancel your own songs. That song was queued by " + trackToRemove.requesterName() + ".", NamedTextColor.RED));
+            return true;
+        }
+
+        // Remove the track
+        coordinator.cancelAt(position).ifPresentOrElse(
+            removed -> {
+                sender.sendMessage(Component.text("Removed from queue: " + removed.track().title() + " - " + removed.track().artist(), NamedTextColor.GREEN));
+                if (isAdmin && !isOwnSong) {
+                    sender.sendMessage(Component.text("(was queued by " + removed.requesterName() + ")", NamedTextColor.GRAY));
+                }
+            },
+            () -> sender.sendMessage(Component.text("Could not remove song at position " + position + ".", NamedTextColor.RED))
+        );
+
+        return true;
+    }
+
+    private boolean cancelAll(CommandSender sender, Player player) {
+        boolean isAdmin = sender.hasPermission("evilkaraoke.admin.cancel");
+        List<KaraokeSession.QueuedTrack> removed = isAdmin
+                ? coordinator.cancelAll()
+                : coordinator.cancelAllByRequester(player.getUniqueId());
+        if (removed.isEmpty()) {
+            sender.sendMessage(Component.text(isAdmin ? "The queue is already empty." : "You have no queued songs to cancel.", NamedTextColor.YELLOW));
+            return true;
+        }
+        sender.sendMessage(Component.text("Removed " + removed.size() + " queued song(s).", NamedTextColor.GREEN));
+        if (!isAdmin) {
+            sender.sendMessage(Component.text("Only your queued songs were removed.", NamedTextColor.GRAY));
+        }
         return true;
     }
 
@@ -313,9 +450,14 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     static List<Component> queueMessages(KaraokeSession.PlaybackSnapshot snapshot, int requestedPage, String title, String label) {
+        return queueMessages(null, snapshot, requestedPage, title, label);
+    }
+
+    private static List<Component> queueMessages(CommandSender sender, KaraokeSession.PlaybackSnapshot snapshot, int requestedPage, String title, String label) {
         List<Component> messages = new ArrayList<>();
         List<KaraokeSession.QueuedTrack> queue = new ArrayList<>(snapshot.requests());
         queue.addAll(snapshot.randomTracks());
+        List<KaraokeSession.QueuedTrack> requests = snapshot.requests();
 
         int page = Math.max(1, requestedPage);
         int totalPages = Math.max(1, (int) Math.ceil(queue.size() / (double) CHAT_PAGE_SIZE));
@@ -331,7 +473,27 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         int start = (page - 1) * CHAT_PAGE_SIZE;
         for (int i = start; i < Math.min(queue.size(), start + CHAT_PAGE_SIZE); i++) {
             KaraokeSession.QueuedTrack queued = queue.get(i);
-            messages.add(Component.text((i + 1) + ". " + queued.track().title() + " - " + queued.track().artist() + " (by " + queued.requesterName() + ")", NamedTextColor.GRAY));
+            int position = i + 1;
+            Component line = Component.text(position + ". " + queued.track().title() + " - " + queued.track().artist() + " (by " + queued.requesterName() + ") ", NamedTextColor.GRAY);
+            int requestIndex = position - 1;
+            if (sender != null && requestIndex >= 0 && requestIndex < requests.size()) {
+                if (requestIndex > 0 && canMoveRequestedRange(sender, requests, requestIndex, requestIndex - 1)) {
+                    line = line.append(Component.text("[Up]", NamedTextColor.GREEN)
+                            .hoverEvent(HoverEvent.showText(Component.text("Move earlier")))
+                            .clickEvent(ClickEvent.runCommand("/" + label + " queue move " + position + " " + (position - 1))))
+                            .append(Component.text(" ", NamedTextColor.GRAY));
+                }
+                if (requestIndex + 1 < requests.size() && canMoveRequestedRange(sender, requests, requestIndex, requestIndex + 1)) {
+                    line = line.append(Component.text("[Down]", NamedTextColor.GREEN)
+                            .hoverEvent(HoverEvent.showText(Component.text("Move later")))
+                            .clickEvent(ClickEvent.runCommand("/" + label + " queue move " + position + " " + (position + 1))))
+                            .append(Component.text(" ", NamedTextColor.GRAY));
+                }
+            }
+            line = line.append(Component.text("[Cancel]", NamedTextColor.RED)
+                    .hoverEvent(HoverEvent.showText(Component.text("Remove this song from the queue")))
+                    .clickEvent(ClickEvent.runCommand("/" + label + " cancel " + position)));
+            messages.add(line);
         }
         if (queue.isEmpty()) {
             messages.add(Component.text(snapshot.current() == null ? "The queue is empty." : "No upcoming songs queued.", NamedTextColor.GRAY));
@@ -343,21 +505,33 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     private boolean control(CommandSender sender, String action) {
-        if (!sender.hasPermission("evilkaraoke.playback." + action)) {
+        String permissionAction = switch (action) {
+            case "next", "previous" -> "skip";
+            default -> action;
+        };
+        if (!sender.hasPermission("evilkaraoke.playback." + permissionAction)) {
             return deny(sender);
         }
         switch (action) {
             case "pause" -> coordinator.pause();
             case "resume" -> coordinator.resume();
-            case "next", "skip" -> coordinator.skip();
+            case "next" -> coordinator.skip();
             case "previous" -> coordinator.previous();
             case "stop" -> coordinator.stop();
             default -> {
                 return unknown(sender);
             }
         }
-        sender.sendMessage(Component.text("Playback " + action + " sent to listeners.", NamedTextColor.GREEN));
+        sender.sendMessage(Component.text(playbackControlMessage(action), NamedTextColor.GREEN));
         return true;
+    }
+
+    private static String playbackControlMessage(String action) {
+        return switch (action) {
+            case "previous" -> "Going back to previous track.";
+            case "next" -> "Skipping to next track.";
+            default -> "Playback " + action + " sent to listeners.";
+        };
     }
 
     private boolean audience(CommandSender sender, String[] args) {
@@ -399,31 +573,27 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Component.text("1. Install the Evilkaraoke client mod (Fabric or NeoForge) to hear audio.", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("2. Ensure your Minecraft sound and Music/Jukebox volume are above zero.", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("3. Run /ek doctor to confirm the client handshake succeeded.", NamedTextColor.GRAY));
-        sender.sendMessage(Component.text("4. If audio stalls, /ek skip to advance the queue.", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("4. If audio stalls, /ek next to advance the queue.", NamedTextColor.GRAY));
         return true;
     }
 
-    private boolean collections(CommandSender sender, String[] args, String subcommand, String label) {
-        if ("setlist".equals(subcommand)) {
-            if (args.length >= 2 && "add".equalsIgnoreCase(args[1])) {
-                return addSetlist(sender, args);
-            }
-            if (!sender.hasPermission("evilkaraoke.command.search")) {
-                return deny(sender);
-            }
-            int page = parsePage(args);
-            async(neurokaraokeClient.setlists((page - 1) * CHAT_PAGE_SIZE, CHAT_PAGE_SIZE),
-                    setlists -> {
-                        if (setlists.isEmpty()) {
-                            sender.sendMessage(Component.text("No Neurokaraoke setlists found for page " + page + ".", NamedTextColor.YELLOW));
-                            return;
-                        }
-                        setlistMessages(page, setlists, label).forEach(sender::sendMessage);
-                    },
-                    error -> sender.sendMessage(ChatMessages.error("Setlist lookup failed", error)));
-            return true;
+    private boolean setlist(CommandSender sender, String[] args, String label) {
+        if (args.length >= 2 && "add".equalsIgnoreCase(args[1])) {
+            return addSetlist(sender, args);
         }
-        sender.sendMessage(Component.text("/ek " + subcommand + " browsing uses the same request flow: use /ek search <name> then click [Request].", NamedTextColor.YELLOW));
+        if (!sender.hasPermission("evilkaraoke.command.search")) {
+            return deny(sender);
+        }
+        int page = parsePage(args);
+        async(neurokaraokeClient.setlists((page - 1) * CHAT_PAGE_SIZE, CHAT_PAGE_SIZE),
+                setlists -> {
+                    if (setlists.isEmpty()) {
+                        sender.sendMessage(Component.text("No Neurokaraoke setlists found for page " + page + ".", NamedTextColor.YELLOW));
+                        return;
+                    }
+                    setlistMessages(page, setlists, label).forEach(sender::sendMessage);
+                },
+                error -> sender.sendMessage(ChatMessages.error("Setlist lookup failed", error)));
         return true;
     }
 
@@ -431,14 +601,14 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         if (!requirePlayer(sender)) {
             return true;
         }
-        if (!sender.hasPermission("evilkaraoke.command.request")) {
-            return deny(sender);
-        }
         if (args.length < 4) {
             sender.sendMessage(Component.text("Usage: /ek setlist add <page> <row>", NamedTextColor.YELLOW));
             return true;
         }
         Player player = (Player) sender;
+        if (!canRequest(player)) {
+            return true;
+        }
         maybeWarnClient(player);
         int page = parsePositiveInt(args[2], 1);
         int row = parsePositiveInt(args[3], 1);
@@ -468,6 +638,72 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         return true;
     }
 
+    private boolean playlist(CommandSender sender, String[] args, String label) {
+        if (args.length >= 2 && "add".equalsIgnoreCase(args[1])) {
+            return addPlaylist(sender, args);
+        }
+        if (!sender.hasPermission("evilkaraoke.command.search")) {
+            return deny(sender);
+        }
+        int page = parsePage(args);
+        async(neurokaraokeClient.publicPlaylists((page - 1) * CHAT_PAGE_SIZE, CHAT_PAGE_SIZE),
+                playlists -> {
+                    if (playlists.isEmpty()) {
+                        sender.sendMessage(Component.text("No public Neurokaraoke playlists found for page " + page + ".", NamedTextColor.YELLOW));
+                        return;
+                    }
+                    playlistMessages(page, playlists, label).forEach(sender::sendMessage);
+                },
+                error -> sender.sendMessage(ChatMessages.error("Playlist lookup failed", error)));
+        return true;
+    }
+
+    private boolean addPlaylist(CommandSender sender, String[] args) {
+        if (!requirePlayer(sender)) {
+            return true;
+        }
+        if (args.length < 4) {
+            sender.sendMessage(Component.text("Usage: /ek playlist add <page> <row>", NamedTextColor.YELLOW));
+            return true;
+        }
+        Player player = (Player) sender;
+        if (!canRequest(player)) {
+            return true;
+        }
+        maybeWarnClient(player);
+        int page = parsePositiveInt(args[2], 1);
+        int row = parsePositiveInt(args[3], 1);
+        if (row > CHAT_PAGE_SIZE) {
+            sender.sendMessage(Component.text("Playlist row must be between 1 and " + CHAT_PAGE_SIZE + ".", NamedTextColor.RED));
+            return true;
+        }
+        async(neurokaraokeClient.publicPlaylists((page - 1) * CHAT_PAGE_SIZE, CHAT_PAGE_SIZE)
+                        .thenCompose(playlists -> {
+                            int index = row - 1;
+                            if (index >= playlists.size()) {
+                                return CompletableFuture.failedFuture(new IllegalArgumentException("That playlist is no longer available on page " + page + "."));
+                            }
+                            NeurokaraokeSetlist playlist = playlists.get(index);
+                            if (playlist.songCount() == 0) {
+                                return CompletableFuture.completedFuture(playlist);
+                            }
+                            return neurokaraokeClient.publicPlaylist(playlist.id());
+                        }),
+                playlist -> {
+                    if (playlist.songs().isEmpty()) {
+                        sender.sendMessage(Component.text("That playlist has no songs to queue.", NamedTextColor.YELLOW));
+                        return;
+                    }
+                    coordinator.requestAll(playlist.songs(), player);
+                    for (KaraokeTrack track : playlist.songs()) {
+                        statsService.recordRequest(player.getUniqueId(), player.getName(), track.id(), track.title());
+                    }
+                    sender.sendMessage(Component.text("Queued " + playlist.songs().size() + " song(s) from playlist " + playlist.name() + ".", NamedTextColor.GREEN));
+                },
+                error -> sender.sendMessage(ChatMessages.error("Could not queue that playlist", error)));
+        return true;
+    }
+
     static List<Component> setlistMessages(int requestedPage, List<NeurokaraokeSetlist> setlists) {
         return setlistMessages(requestedPage, setlists, "ek");
     }
@@ -480,10 +716,15 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
             NeurokaraokeSetlist setlist = setlists.get(i);
             int number = ((page - 1) * CHAT_PAGE_SIZE) + i + 1;
             String duration = setlist.totalDuration() == null ? "" : " | " + DurationFormatter.mmss(setlist.totalDuration());
-            Component line = Component.text(number + ". " + setlist.name() + " - " + setlist.songCount() + " songs" + duration + " ", NamedTextColor.GRAY)
-                    .append(Component.text("[Queue All]", NamedTextColor.GREEN)
-                            .hoverEvent(HoverEvent.showText(Component.text("Queue all songs from " + setlist.name())))
-                            .clickEvent(ClickEvent.runCommand("/" + label + " setlist add " + page + " " + (i + 1))));
+            Component line = Component.text(number + ". " + setlist.name() + " - " + setlist.songCount() + " songs" + duration + " ", NamedTextColor.GRAY);
+            if (setlist.songCount() == 0) {
+                line = line.append(Component.text("[Empty]", NamedTextColor.DARK_GRAY)
+                        .hoverEvent(HoverEvent.showText(Component.text("This setlist has no songs"))));
+            } else {
+                line = line.append(Component.text("[Queue All]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Queue all songs from " + setlist.name())))
+                        .clickEvent(ClickEvent.runCommand("/" + label + " setlist add " + page + " " + (i + 1))));
+            }
             messages.add(line);
         }
         boolean hasNextPage = setlists.size() >= CHAT_PAGE_SIZE;
@@ -493,19 +734,52 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         return messages;
     }
 
+    static List<Component> playlistMessages(int requestedPage, List<NeurokaraokeSetlist> playlists, String label) {
+        List<Component> messages = new ArrayList<>();
+        int page = Math.max(1, requestedPage);
+        messages.add(Component.text("Public playlists (page " + page + "):", NamedTextColor.GOLD));
+        for (int i = 0; i < Math.min(playlists.size(), CHAT_PAGE_SIZE); i++) {
+            NeurokaraokeSetlist playlist = playlists.get(i);
+            int number = ((page - 1) * CHAT_PAGE_SIZE) + i + 1;
+            String duration = playlist.totalDuration() == null ? "" : " | " + DurationFormatter.mmss(playlist.totalDuration());
+            Component line = Component.text(number + ". " + playlist.name() + " - " + playlist.songCount() + " songs" + duration + " ", NamedTextColor.GRAY);
+            if (playlist.songCount() == 0) {
+                line = line.append(Component.text("[Empty]", NamedTextColor.DARK_GRAY)
+                        .hoverEvent(HoverEvent.showText(Component.text("This playlist has no songs"))));
+            } else {
+                line = line.append(Component.text("[Queue All]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Queue all songs from " + playlist.name())))
+                        .clickEvent(ClickEvent.runCommand("/" + label + " playlist add " + page + " " + (i + 1))));
+            }
+            messages.add(line);
+        }
+        boolean hasNextPage = playlists.size() >= CHAT_PAGE_SIZE;
+        if (page > 1 || hasNextPage) {
+            messages.add(pageNavigation("playlist", "/" + label + " playlist", page, page > 1, hasNextPage));
+        }
+        return messages;
+    }
+
     static List<Component> searchMessages(String query, int requestedPage, List<KaraokeTrack> results, String label) {
+        return searchMessages(query, requestedPage, results, label, results.size() > CHAT_PAGE_SIZE);
+    }
+
+    static List<Component> searchMessages(String query, int requestedPage, List<KaraokeTrack> results, String label, boolean hasNextPage) {
         List<Component> messages = new ArrayList<>();
         int page = Math.max(1, requestedPage);
         messages.add(Component.text("Results for \"" + query + "\" (page " + page + "):", NamedTextColor.GOLD));
         for (int i = 0; i < Math.min(results.size(), CHAT_PAGE_SIZE); i++) {
             KaraokeTrack track = results.get(i);
-            Component line = Component.text("- " + track.title() + " - " + track.artist() + " ", NamedTextColor.GRAY)
-                    .append(Component.text("[Request]", NamedTextColor.GREEN)
-                            .hoverEvent(HoverEvent.showText(Component.text("Request " + track.title())))
-                            .clickEvent(ClickEvent.runCommand("/" + label + " request id " + track.id())));
+            Component line = Component.text("- " + track.title() + " - " + track.artist() + " ", NamedTextColor.GRAY);
+            if (safeCommandToken(track.id())) {
+                line = line.append(Component.text("[Request]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Request " + track.title())))
+                        .clickEvent(ClickEvent.runCommand("/" + label + " request id " + track.id())));
+            } else {
+                line = line.append(Component.text("(request with /" + label + " request id " + track.id() + ")", NamedTextColor.YELLOW));
+            }
             messages.add(line);
         }
-        boolean hasNextPage = results.size() >= CHAT_PAGE_SIZE;
         if (page > 1 || hasNextPage) {
             messages.add(pageNavigation("search", "/" + label + " search " + query, page, page > 1, hasNextPage));
         }
@@ -515,16 +789,16 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     private static Component pageNavigation(String surface, String commandPrefix, int page, boolean hasPreviousPage, boolean hasNextPage) {
         Component navigation = Component.empty();
         if (hasPreviousPage) {
-            navigation = navigation.append(Component.text("[Prev]", NamedTextColor.AQUA)
-                    .hoverEvent(HoverEvent.showText(Component.text("Open " + surface + " page " + (page - 1))))
+            navigation = navigation.append(Component.text("⬆️ ", NamedTextColor.AQUA)
+                    .hoverEvent(HoverEvent.showText(Component.text("Previous page (" + (page - 1) + ")")))
                     .clickEvent(ClickEvent.runCommand(commandPrefix + " " + (page - 1))));
         }
         if (hasPreviousPage && hasNextPage) {
             navigation = navigation.append(Component.text(" ", NamedTextColor.GRAY));
         }
         if (hasNextPage) {
-            navigation = navigation.append(Component.text("[Next]", NamedTextColor.AQUA)
-                    .hoverEvent(HoverEvent.showText(Component.text("Open " + surface + " page " + (page + 1))))
+            navigation = navigation.append(Component.text("⬇️", NamedTextColor.AQUA)
+                    .hoverEvent(HoverEvent.showText(Component.text("Next page (" + (page + 1) + ")")))
                     .clickEvent(ClickEvent.runCommand(commandPrefix + " " + (page + 1))));
         }
         return navigation;
@@ -546,6 +820,20 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     private record SearchRequest(String query, int page) {
+    }
+
+    private record SearchPage(List<KaraokeTrack> results, boolean hasNextPage) {
+    }
+
+    private static boolean isSongIdMode(String value) {
+        return "id".equalsIgnoreCase(value);
+    }
+
+    private static String joinTail(String[] args, int startInclusive) {
+        if (args.length <= startInclusive) {
+            return null;
+        }
+        return String.join(" ", java.util.Arrays.copyOfRange(args, startInclusive, args.length));
     }
 
     private boolean unknown(CommandSender sender) {
@@ -575,13 +863,21 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
     private <T> void async(CompletableFuture<T> future, Consumer<T> onSuccess, Consumer<Throwable> onError) {
         future.whenComplete((value, error) -> Bukkit.getScheduler().runTask(plugin, () -> {
             if (error != null) {
-                Throwable cause = error.getCause() == null ? error : error.getCause();
-                plugin.getLogger().log(Level.WARNING, "Evilkaraoke command failed", cause);
+                Throwable cause = ErrorDetails.unwrap(error);
+                logCommandFailure(cause);
                 onError.accept(cause);
             } else {
                 onSuccess.accept(value);
             }
         }));
+    }
+
+    private void logCommandFailure(Throwable cause) {
+        if (cause instanceof NeurokaraokeApiUnavailableException) {
+            plugin.getLogger().warning("Evilkaraoke command failed: " + cause.getMessage());
+            return;
+        }
+        plugin.getLogger().log(Level.WARNING, "Evilkaraoke command failed", cause);
     }
 
     private int parsePage(String[] args) {
@@ -603,12 +899,41 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
         }
     }
 
+    private int parseRawInt(String value, int fallback) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static boolean canMoveRequestedRange(CommandSender sender, List<KaraokeSession.QueuedTrack> requests, int fromIndex, int toIndex) {
+        if (sender.hasPermission("evilkaraoke.admin.queue")) {
+            return true;
+        }
+        if (!(sender instanceof Player player)) {
+            return false;
+        }
+        int start = Math.min(fromIndex, toIndex);
+        int end = Math.max(fromIndex, toIndex);
+        for (int i = start; i <= end; i++) {
+            if (i < 0 || i >= requests.size()) {
+                return false;
+            }
+            KaraokeSession.QueuedTrack queued = requests.get(i);
+            if (queued.requester() == null || !queued.requester().equals(player.getUniqueId())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     @Override
     public @Nullable List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, String @NotNull [] args) {
         if (args.length == 1) {
             String prefix = args[0].toLowerCase(Locale.ROOT);
             List<String> matches = new ArrayList<>();
-            for (String subcommand : ROOT_SUBCOMMANDS) {
+            for (String subcommand : CANONICAL_ROOT_SUBCOMMANDS) {
                 if (subcommand.startsWith(prefix)) {
                     matches.add(subcommand);
                 }
@@ -616,14 +941,147 @@ public final class EvilkaraokeCommand implements CommandExecutor, TabCompleter {
             return matches;
         }
         if (args.length == 2 && "radio".equalsIgnoreCase(args[0])) {
-            return List.of("radio21", "swarmfm");
+            return filterPrefix(List.of("radio21", "swarmfm"), args[1]);
+        }
+        if (args.length == 2 && "request".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("id", "url"), args[1]);
+        }
+        if (args.length == 2 && "queue".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("move", "1"), args[1]);
+        }
+        if (args.length == 2 && "cancel".equalsIgnoreCase(args[0])) {
+            return filterPrefix(cancelArgumentSuggestions(sender), args[1]);
+        }
+        if (args.length == 2 && "setlist".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("add", "1"), args[1]);
+        }
+        if (args.length == 2 && "playlist".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("add", "1"), args[1]);
         }
         if (args.length == 2 && "stats".equalsIgnoreCase(args[0])) {
-            return List.of("me", "user", "server", "top");
+            return filterPrefix(List.of("me", "user", "server", "top"), args[1]);
+        }
+        if (args.length == 3 && "stats".equalsIgnoreCase(args[0]) && "user".equalsIgnoreCase(args[1])) {
+            return filterPrefix(onlinePlayerNames(), args[2]);
+        }
+        if (args.length == 3 && "stats".equalsIgnoreCase(args[0]) && "top".equalsIgnoreCase(args[1])) {
+            return filterPrefix(List.of("users", "songs"), args[2]);
+        }
+        if (args.length == 4 && "stats".equalsIgnoreCase(args[0]) && "top".equalsIgnoreCase(args[1])) {
+            if ("songs".equalsIgnoreCase(args[2])) {
+                return filterPrefix(List.of("played", "requested"), args[3]);
+            }
+            if ("users".equalsIgnoreCase(args[2])) {
+                return filterPrefix(List.of("time", "song-count", "request-count"), args[3]);
+            }
         }
         if (args.length == 2 && "audience".equalsIgnoreCase(args[0])) {
-            return List.of("@a", "@s");
+            List<String> targets = new ArrayList<>(List.of("@a", "@s"));
+            targets.addAll(onlinePlayerNames());
+            return filterPrefix(targets, args[1]);
+        }
+        if (isCollectionAddSuggestion(args)) {
+            return filterPrefix(numberRange(1, CHAT_PAGE_SIZE), args[args.length - 1]);
+        }
+        if (args.length == 3 && "queue".equalsIgnoreCase(args[0]) && "move".equalsIgnoreCase(args[1])) {
+            return filterPrefix(moveFromPositionSuggestions(sender), args[2]);
+        }
+        if (args.length == 4 && "queue".equalsIgnoreCase(args[0]) && "move".equalsIgnoreCase(args[1])) {
+            return filterPrefix(moveToPositionSuggestions(sender, args[2]), args[3]);
         }
         return List.of();
+    }
+
+    private List<String> onlinePlayerNames() {
+        return Bukkit.getOnlinePlayers().stream()
+                .map(Player::getName)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    private List<String> cancelArgumentSuggestions(CommandSender sender) {
+        if (!(sender instanceof Player player) || !sender.hasPermission("evilkaraoke.command.cancel")) {
+            return List.of();
+        }
+        boolean isAdmin = sender.hasPermission("evilkaraoke.admin.cancel");
+        List<KaraokeSession.QueuedTrack> queue = new ArrayList<>(coordinator.queue());
+        List<String> suggestions = new ArrayList<>(List.of("all"));
+        for (int i = 0; i < queue.size(); i++) {
+            KaraokeSession.QueuedTrack queued = queue.get(i);
+            boolean isOwnSong = queued.requester() != null && queued.requester().equals(player.getUniqueId());
+            if (isAdmin || isOwnSong) {
+                suggestions.add(Integer.toString(i + 1));
+            }
+        }
+        return suggestions;
+    }
+
+    private List<String> moveFromPositionSuggestions(CommandSender sender) {
+        if (!(sender instanceof Player) || !sender.hasPermission("evilkaraoke.command.queue")) {
+            return List.of();
+        }
+        List<KaraokeSession.QueuedTrack> requests = coordinator.snapshot().requests();
+        List<String> positions = new ArrayList<>();
+        for (int from = 0; from < requests.size(); from++) {
+            for (int to = 0; to < requests.size(); to++) {
+                if (from != to && canMoveRequestedRange(sender, requests, from, to)) {
+                    positions.add(Integer.toString(from + 1));
+                    break;
+                }
+            }
+        }
+        return positions;
+    }
+
+    private List<String> moveToPositionSuggestions(CommandSender sender, String fromValue) {
+        if (!(sender instanceof Player) || !sender.hasPermission("evilkaraoke.command.queue")) {
+            return List.of();
+        }
+        int from = parseRawInt(fromValue, -1) - 1;
+        List<KaraokeSession.QueuedTrack> requests = coordinator.snapshot().requests();
+        if (from < 0 || from >= requests.size()) {
+            return List.of();
+        }
+        List<String> positions = new ArrayList<>();
+        for (int to = 0; to < requests.size(); to++) {
+            if (from != to && canMoveRequestedRange(sender, requests, from, to)) {
+                positions.add(Integer.toString(to + 1));
+            }
+        }
+        return positions;
+    }
+
+    private static boolean isCollectionAddSuggestion(String[] args) {
+        if (args.length != 3 && args.length != 4) {
+            return false;
+        }
+        boolean collectionCommand = "setlist".equalsIgnoreCase(args[0]) || "playlist".equalsIgnoreCase(args[0]);
+        return collectionCommand && "add".equalsIgnoreCase(args[1]);
+    }
+
+    private static List<String> numberRange(int startInclusive, int endInclusive) {
+        List<String> values = new ArrayList<>();
+        for (int value = startInclusive; value <= endInclusive; value++) {
+            values.add(Integer.toString(value));
+        }
+        return values;
+    }
+
+    private static boolean safeCommandToken(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (Character.isWhitespace(ch) || Character.isISOControl(ch)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<String> filterPrefix(List<String> values, String prefix) {
+        String lowerPrefix = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+        return values.stream().filter(value -> value.toLowerCase(Locale.ROOT).startsWith(lowerPrefix)).toList();
     }
 }

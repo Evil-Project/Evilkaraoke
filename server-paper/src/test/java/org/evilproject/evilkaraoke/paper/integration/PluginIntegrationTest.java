@@ -187,6 +187,7 @@ class PluginIntegrationTest {
     void offsetTracking() {
         session.request(sampleTrack, UUID.randomUUID(), "Player");
         session.next();
+        session.startTimer(); // Start timer to simulate client beginning playback
 
         // Should start at zero
         var offset = session.offset();

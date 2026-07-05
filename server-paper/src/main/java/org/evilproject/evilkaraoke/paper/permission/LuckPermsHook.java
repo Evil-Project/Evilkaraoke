@@ -7,7 +7,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.RegisteredServiceProvider;
 
 import net.luckperms.api.LuckPerms;
-import net.luckperms.api.cacheddata.CachedMetaData;
 import net.luckperms.api.model.user.User;
 
 /**
@@ -46,22 +45,5 @@ final class LuckPermsHook {
         }
         String group = user.getPrimaryGroup();
         return group != null ? group : "default";
-    }
-
-    int getMetaInt(Player player, String key, int defaultValue) {
-        User user = api.getPlayerAdapter(Player.class).getUser(player);
-        if (user == null) {
-            return defaultValue;
-        }
-        CachedMetaData meta = user.getCachedData().getMetaData();
-        String value = meta.getMetaValue(key);
-        if (value == null) {
-            return defaultValue;
-        }
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
     }
 }

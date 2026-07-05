@@ -1,13 +1,16 @@
 package org.evilproject.evilkaraoke.paper.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -26,9 +29,36 @@ class NeurokaraokeClientTest {
                     "https://api.example/search",
                     "https://api.example/songs/",
                     "https://api.example/playlists/",
+                    "https://api.example/playlist/public",
+                    "https://idk.example/public/playlist/",
                     "https://api.example/artists/",
                     "https://audio.example/",
                     "https://images.example/"));
+
+    @Test
+    void radio21UsesLiveOggStreamEndpoint() {
+        var track = client.radio("radio21").join();
+
+        assertEquals("radio21", track.id());
+        assertEquals("https://radio.twinskaraoke.com/radio/8000/radio.ogg", track.primaryAsset().url());
+        assertEquals(AudioFormat.STREAM, track.primaryAsset().format());
+    }
+
+    @Test
+    void closedChannelErrorsAreTransientApiFailures() {
+        assertTrue(NeurokaraokeClient.isTransient(new ClosedChannelException()));
+    }
+
+    @Test
+    void exhaustedTransientFailureUsesApiUnavailableException() {
+        NeurokaraokeClient localClient = new NeurokaraokeClient(
+                Logger.getLogger("test"),
+                unreachableEndpoints());
+
+        CompletionException error = assertThrows(CompletionException.class, () -> localClient.search("never").join());
+
+        assertInstanceOf(NeurokaraokeApiUnavailableException.class, error.getCause());
+    }
 
     @Test
     void trackFromJsonAcceptsArrayResponse() {
@@ -114,6 +144,8 @@ class NeurokaraokeClientTest {
                             "http://localhost:" + server.getAddress().getPort() + "/songs",
                             "http://localhost:" + server.getAddress().getPort() + "/songs/",
                             "http://localhost:" + server.getAddress().getPort() + "/playlists/",
+                            "http://localhost:" + server.getAddress().getPort() + "/playlist/public",
+                            "http://localhost:" + server.getAddress().getPort() + "/public/playlist/",
                             "http://localhost:" + server.getAddress().getPort() + "/artists/",
                             "https://audio.example/",
                             "https://images.example/"));
@@ -183,6 +215,8 @@ class NeurokaraokeClientTest {
                             "http://localhost:" + server.getAddress().getPort() + "/songs",
                             "http://localhost:" + server.getAddress().getPort() + "/songs/",
                             "http://localhost:" + server.getAddress().getPort() + "/api/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/public",
+                            "http://localhost:" + server.getAddress().getPort() + "/public/playlist/",
                             "http://localhost:" + server.getAddress().getPort() + "/artists/",
                             "https://audio.example/",
                             "https://images.example/"));
@@ -206,5 +240,173 @@ class NeurokaraokeClientTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void publicPlaylistsUsesPublicEndpointAndParsesSummaries() throws IOException {
+        AtomicReference<String> requestTarget = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/api/playlist/public", exchange -> {
+            requestTarget.set(exchange.getRequestURI().toString());
+            byte[] response = """
+                    [{
+                      "id": "playlist-1",
+                      "name": "Public Mix",
+                      "songCount": 45,
+                      "playCount": 23,
+                      "favoriteCount": 1,
+                      "songListDTOs": null,
+                      "isPublic": true,
+                      "isSetList": false
+                    }]
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            NeurokaraokeClient localClient = new NeurokaraokeClient(
+                    Logger.getLogger("test"),
+                    new NeurokaraokeEndpoints(
+                            1000,
+                            0,
+                            0,
+                            "http://localhost:" + server.getAddress().getPort() + "/random",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/public",
+                            "http://localhost:" + server.getAddress().getPort() + "/public/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/artists/",
+                            "https://audio.example/",
+                            "https://images.example/"));
+
+            var playlists = localClient.publicPlaylists(5, 5).join();
+
+            assertTrue(requestTarget.get().contains("/api/playlist/public?"));
+            assertTrue(requestTarget.get().contains("startIndex=5"));
+            assertTrue(requestTarget.get().contains("pageSize=5"));
+            assertTrue(requestTarget.get().contains("sortBy=UpdatedAt"));
+            assertTrue(requestTarget.get().contains("sortDescending=True"));
+            assertEquals(1, playlists.size());
+            assertEquals("playlist-1", playlists.getFirst().id());
+            assertEquals("Public Mix", playlists.getFirst().name());
+            assertEquals(45, playlists.getFirst().songCount());
+            assertTrue(playlists.getFirst().songs().isEmpty());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void publicPlaylistLoadsAnonymousDetailSongs() throws IOException {
+        AtomicReference<String> requestTarget = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/public/playlist/playlist-1", exchange -> {
+            requestTarget.set(exchange.getRequestURI().toString());
+            byte[] response = """
+                    {
+                      "name": "Public Mix",
+                      "songs": [{
+                        "title": "The Disease Called Love",
+                        "originalArtists": "Neru",
+                        "coverArtists": "Neuro & Evil",
+                        "audioUrl": "https://storage.neurokaraoke.com/audio/disease.mp3"
+                      }]
+                    }
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            NeurokaraokeClient localClient = new NeurokaraokeClient(
+                    Logger.getLogger("test"),
+                    new NeurokaraokeEndpoints(
+                            1000,
+                            0,
+                            0,
+                            "http://localhost:" + server.getAddress().getPort() + "/random",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/public",
+                            "http://localhost:" + server.getAddress().getPort() + "/public/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/artists/",
+                            "https://audio.example/",
+                            "https://images.example/"));
+
+            var playlist = localClient.publicPlaylist("playlist-1").join();
+
+            assertEquals("/public/playlist/playlist-1", requestTarget.get());
+            assertEquals("playlist-1", playlist.id());
+            assertEquals("Public Mix", playlist.name());
+            assertEquals(1, playlist.songCount());
+            assertEquals(1, playlist.songs().size());
+            assertEquals("The Disease Called Love", playlist.songs().getFirst().title());
+            assertEquals("Neru", playlist.songs().getFirst().artist());
+            assertEquals("https://storage.neurokaraoke.com/audio/disease.mp3", playlist.songs().getFirst().primaryAsset().url());
+            assertEquals(AudioFormat.UNKNOWN, playlist.songs().getFirst().primaryAsset().format());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void publicPlaylistTreatsNoSongsResponseAsEmptyPlaylist() throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/public/playlist/empty-playlist", exchange -> {
+            byte[] response = "No songs found in playlist".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+            exchange.sendResponseHeaders(400, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            NeurokaraokeClient localClient = new NeurokaraokeClient(
+                    Logger.getLogger("test"),
+                    new NeurokaraokeEndpoints(
+                            1000,
+                            0,
+                            0,
+                            "http://localhost:" + server.getAddress().getPort() + "/random",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs",
+                            "http://localhost:" + server.getAddress().getPort() + "/songs/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/api/playlist/public",
+                            "http://localhost:" + server.getAddress().getPort() + "/public/playlist/",
+                            "http://localhost:" + server.getAddress().getPort() + "/artists/",
+                            "https://audio.example/",
+                            "https://images.example/"));
+
+            NeurokaraokeSetlist playlist = localClient.publicPlaylist("empty-playlist").join();
+
+            assertEquals("empty-playlist", playlist.id());
+            assertEquals(0, playlist.songCount());
+            assertTrue(playlist.songs().isEmpty());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static NeurokaraokeEndpoints unreachableEndpoints() {
+        return new NeurokaraokeEndpoints(
+                200,
+                0,
+                0,
+                "http://127.0.0.1:1/random",
+                "http://127.0.0.1:1/songs",
+                "http://127.0.0.1:1/songs/",
+                "http://127.0.0.1:1/api/playlist/",
+                "http://127.0.0.1:1/api/playlist/public",
+                "http://127.0.0.1:1/public/playlist/",
+                "http://127.0.0.1:1/artists/",
+                "https://audio.example/",
+                "https://images.example/");
     }
 }
