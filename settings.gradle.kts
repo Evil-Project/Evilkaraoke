@@ -8,4 +8,4 @@ pluginManagement {
 }
 
 rootProject.name = "Evilkaraoke"
-include("common", "server-paper", "client-common", "client-fabric", "client-neoforge")
+include("common", "server-common", "server-paper", "client-common", "client-fabric", "client-neoforge")
