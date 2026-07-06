@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="${1:-${RELEASE_VERSION:-0.1.1}}"
+VERSION="${1:-${RELEASE_VERSION:-1.0.0}}"
 BUILD_DIR="build/release"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GRADLE_ARGS=()

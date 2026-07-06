@@ -27,7 +27,6 @@ import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
  */
 public final class EvilKaraokeNeoForgeClient {
     private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
-    private static final String MOD_VERSION = "0.1.1";
     private static final int STATUS_REPORT_INTERVAL_TICKS = 20; // Report status every second
     private static final int HELLO_RETRY_TICKS = 100;
 
@@ -62,7 +61,8 @@ public final class EvilKaraokeNeoForgeClient {
         NeoForge.EVENT_BUS.addListener(this::onClientTick);
 
         String minecraftVersion = SharedConstants.getCurrentVersion().name();
-        controller = new ClientAudioController(LOGGER, MOD_VERSION, minecraftVersion, "neoforge");
+        String modVersion = container.getModInfo().getVersion().toString();
+        controller = new ClientAudioController(LOGGER, modVersion, minecraftVersion, "neoforge");
 
         // Show the vanilla music toast whenever a karaoke track starts playing.
         controller.setOnPlay(this::showMusicToast);
