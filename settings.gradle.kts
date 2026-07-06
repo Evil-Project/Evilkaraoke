@@ -7,5 +7,9 @@ pluginManagement {
     }
 }
 
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 rootProject.name = "Evilkaraoke"
-include("common", "server-common", "server-paper", "client-common", "client-fabric", "client-neoforge")
+include("shared-core", "server-core", "paper-plugin", "client-core", "fabric-mod", "neoforge-mod")

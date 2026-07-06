@@ -27,13 +27,13 @@ A Minecraft karaoke system for Paper, Fabric, and NeoForge servers with Fabric a
 ./gradlew build
 
 # Paper server: copy plugin to your Paper server
-cp server-paper/build/libs/Evilkaraoke-Paper-0.1.1.jar /path/to/server/plugins/
+cp paper-plugin/build/libs/Evilkaraoke-Paper-0.1.1.jar /path/to/server/plugins/
 
 # Fabric server or Fabric client: copy the same Fabric mod jar to mods/
-cp client-fabric/build/libs/Evilkaraoke-Fabric-0.1.1.jar ~/.minecraft/mods/
+cp fabric-mod/build/libs/Evilkaraoke-Fabric-0.1.1.jar ~/.minecraft/mods/
 
 # NeoForge server or NeoForge client: copy the same NeoForge mod jar to mods/
-cp client-neoforge/build/libs/Evilkaraoke-NeoForge-0.1.1.jar ~/.minecraft/mods/
+cp neoforge-mod/build/libs/Evilkaraoke-NeoForge-0.1.1.jar ~/.minecraft/mods/
 ```
 
 Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and NeoForge generate `config/evilkaraoke/evilkaraoke.json`. Edit the API endpoints, then run `/ek reload`.
@@ -45,9 +45,9 @@ Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and N
 /ek current                 # What's playing?
 /ek queue                   # What's up next?
 /ek queue move 2 1          # Move your queued song earlier
-/ek pause                   # Pause (ops only)
-/ek resume                  # Resume (ops only)
-/ek next                    # Skip to next (ops only)
+/ek queue pause             # Pause (ops only)
+/ek queue resume            # Resume (ops only)
+/ek queue next              # Skip to next (ops only)
 ```
 
 ## Installation
@@ -110,7 +110,7 @@ All commands use `/ek`.
 - `/ek playlist [page]` — Browse public Neurokaraoke playlists and queue one by row
 - `/ek queue` — Show upcoming tracks
 - `/ek queue move <from> <to>` — Reorder your queued requested songs
-- `/ek cancel <position|all>` — Remove one or all of your queued songs
+- `/ek queue cancel <position|all>` — Remove one or all of your queued songs
 - `/ek current` — Show currently playing track
 - `/ek randomsong` — Queue a random song
 - `/ek stats me` — View your statistics
@@ -118,11 +118,11 @@ All commands use `/ek`.
 
 ### For Operators (require permission)
 
-- `/ek pause` — Pause current playback
-- `/ek resume` — Resume paused playback
-- `/ek previous` — Return to the previous track
-- `/ek next` — Skip current track
-- `/ek stop` — Stop playback and clear queue
+- `/ek queue pause` — Pause current playback
+- `/ek queue resume` — Resume paused playback
+- `/ek queue previous` — Return to the previous track
+- `/ek queue next` — Skip current track
+- `/ek queue stop` — Stop current playback
 - `/ek audience <@a|@s|player>` — Set playback target (all/@a, self/@s, or specific player)
 - `/ek radio <radio21|swarmfm>` — Start radio mode
 - `/ek reload` — Reload configuration
@@ -137,20 +137,29 @@ All commands use `/ek`.
 evilkaraoke.command.help: true           # Help command
 evilkaraoke.command.search: true         # Search songs
 evilkaraoke.command.request: true        # Queue songs
+evilkaraoke.command.randomsong: true     # Queue a random song
+evilkaraoke.command.setlist: true        # Browse and queue setlists
+evilkaraoke.command.playlist: true       # Browse and queue public playlists
+evilkaraoke.command.issue: true          # Troubleshooting help
 evilkaraoke.command.queue: true          # View queue
-evilkaraoke.command.cancel: true         # Cancel own queued songs
+evilkaraoke.command.queue.move: true     # Move your queued songs
+evilkaraoke.command.queue.cancel: true   # Cancel own queued songs
+evilkaraoke.command.queue.random: true   # Toggle random queue playback
+evilkaraoke.command.queue.loop: true     # Toggle queue or single-song loop
+evilkaraoke.command.queue.pause: op      # Pause playback
+evilkaraoke.command.queue.resume: op     # Resume playback
+evilkaraoke.command.queue.previous: op   # Go to previous track
+evilkaraoke.command.queue.next: op       # Skip to next track
+evilkaraoke.command.queue.stop: op       # Stop playback
 evilkaraoke.command.current: true        # View current track
 evilkaraoke.command.stats: true          # View statistics
 evilkaraoke.command.radio: true          # Use radio mode
-evilkaraoke.playback.pause: op           # Pause playback
-evilkaraoke.playback.resume: op          # Resume playback
-evilkaraoke.playback.skip: op            # Skip tracks
-evilkaraoke.playback.stop: op            # Stop playback
-evilkaraoke.playback.audience: op        # Change audience
-evilkaraoke.admin.cancel: op             # Cancel any queued song
-evilkaraoke.admin.queue: op              # Reorder any requested queued song
-evilkaraoke.admin.reload: op             # Reload config
-evilkaraoke.admin.doctor: op             # Diagnostics
+evilkaraoke.command.audience: op         # Change audience
+evilkaraoke.command.reload: op           # Reload config
+evilkaraoke.command.doctor: op           # Diagnostics
+evilkaraoke.command.listeners: op        # List connected clients
+evilkaraoke.admin.queue.cancel: op       # Cancel any queued song
+evilkaraoke.admin.queue.move: op         # Reorder any requested queued song
 ```
 
 On Fabric, Evilkaraoke uses `fabric-permissions-api-v0`, so LuckPerms Fabric can control the same permission nodes Paper uses. `/ek stats me` shows the player's LuckPerms primary group when LuckPerms is installed.
@@ -175,12 +184,12 @@ On Fabric, Evilkaraoke uses `fabric-permissions-api-v0`, so LuckPerms Fabric can
 
 ### Modules
 
-- **common** — Shared protocol (packets, models, codec) - Java 25
-- **server-common** — Loader-neutral server core (commands, queue, API client, stats)
-- **server-paper** — Paper plugin adapter - Paper 26.2
-- **client-common** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 25
-- **client-fabric** — Fabric client/server entrypoints + custom payload networking - MC 26.2 + Fabric
-- **client-neoforge** — NeoForge client/server entrypoints + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
+- **shared-core** — Shared protocol (packets, models, codec) - Java 25
+- **server-core** — Loader-neutral server core (commands, queue, API client, stats)
+- **paper-plugin** — Paper plugin adapter - Paper 26.2
+- **client-core** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 25
+- **fabric-mod** — Fabric client/server entrypoints + custom payload networking - MC 26.2 + Fabric
+- **neoforge-mod** — NeoForge client/server entrypoints + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
 
 ### Protocol
 
@@ -192,8 +201,9 @@ Custom payloads over three channels (JSON-encoded):
 
 2. **evilkaraoke:audio** (Server → Client)
    - Audio command packets: PLAY, PAUSE, RESUME, STOP, VOLUME, SYNC
-   - PLAY includes: track metadata, HTTP audio URL, playback target, position, volume
-   - Server never sends raw audio data — only URLs for clients to stream
+   - PLAY includes: track metadata, playback target, position, volume, and delivery mode
+   - Normal playback uses `SERVER_STREAM`: the server downloads the audio once, broadcasts encoded audio chunks to clients, and gives them a shared scheduled start time
+   - `URL` delivery remains available for compatibility and tests
 
 3. **evilkaraoke:status** (Client → Server)
    - Client playback state: READY, PLAYING, PAUSED, BUFFERING, ERROR
@@ -262,9 +272,9 @@ All user-facing messages are customizable with MiniMessage formatting support. C
 ```
 
 Artifacts:
-- `server-paper/build/libs/Evilkaraoke-Paper-0.1.1.jar`
-- `client-fabric/build/libs/Evilkaraoke-Fabric-0.1.1.jar`
-- `client-neoforge/build/libs/Evilkaraoke-NeoForge-0.1.1.jar`
+- `paper-plugin/build/libs/Evilkaraoke-Paper-0.1.1.jar`
+- `fabric-mod/build/libs/Evilkaraoke-Fabric-0.1.1.jar`
+- `neoforge-mod/build/libs/Evilkaraoke-NeoForge-0.1.1.jar`
 
 ## Development
 
@@ -277,12 +287,12 @@ Artifacts:
 
 ```
 Evilkaraoke/
-├── common/              # Shared protocol (packets, models, codec)
-├── server-common/       # Loader-neutral server core
-├── client-common/       # Loader-neutral audio engine (JavaSound)
-├── client-fabric/       # Fabric mod (client + server networking)
-├── client-neoforge/     # NeoForge mod (client + server networking)
-├── server-paper/        # Paper plugin (commands, API, queue, stats)
+├── shared-core/         # Shared protocol (packets, models, codec)
+├── server-core/         # Loader-neutral server core
+├── client-core/         # Loader-neutral audio engine (JavaSound)
+├── fabric-mod/          # Fabric mod (client + server networking)
+├── neoforge-mod/        # NeoForge mod (client + server networking)
+├── paper-plugin/        # Paper plugin (commands, API, queue, stats)
 ├── gradle/              # Gradle wrapper + libs.versions.toml
 └── build.gradle.kts     # Root build configuration
 ```

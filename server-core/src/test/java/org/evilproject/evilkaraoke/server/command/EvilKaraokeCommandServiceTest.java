@@ -1,0 +1,498 @@
+package org.evilproject.evilkaraoke.server.command;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Optional;
+import java.util.List;
+import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import org.evilproject.evilkaraoke.common.model.AudioAsset;
+import org.evilproject.evilkaraoke.common.model.AudioFormat;
+import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
+import org.evilproject.evilkaraoke.common.model.PlaybackState;
+import org.evilproject.evilkaraoke.common.model.TrackType;
+import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
+import org.evilproject.evilkaraoke.server.core.EvilKaraokeServerCore;
+import org.evilproject.evilkaraoke.server.platform.KaraokePlayer;
+import org.evilproject.evilkaraoke.server.platform.ServerPlaybackPlatform;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+class EvilKaraokeCommandServiceTest {
+    @TempDir
+    private Path tempDir;
+
+    @Test
+    void suggestsRequestModes() {
+        assertEquals(List.of("id", "url"), EvilKaraokeCommandService.suggest(new String[] {"request", ""}));
+        assertEquals(List.of("url"), EvilKaraokeCommandService.suggest(new String[] {"request", "u"}));
+    }
+
+    @Test
+    void suggestsQueueMove() {
+        assertEquals(List.of("move", "cancel", "random", "loop", "previous", "next", "pause", "resume", "stop", "1"), EvilKaraokeCommandService.suggest(new String[] {"queue", ""}));
+        assertEquals(List.of("cancel"), EvilKaraokeCommandService.suggest(new String[] {"queue", "c"}));
+        assertEquals(List.of("move"), EvilKaraokeCommandService.suggest(new String[] {"queue", "m"}));
+        assertEquals(List.of("loop"), EvilKaraokeCommandService.suggest(new String[] {"queue", "l"}));
+        assertEquals(List.of("next"), EvilKaraokeCommandService.suggest(new String[] {"queue", "n"}));
+        assertEquals(List.of("previous", "pause"), EvilKaraokeCommandService.suggest(new String[] {"queue", "p"}));
+        assertEquals(List.of("random", "resume"), EvilKaraokeCommandService.suggest(new String[] {"queue", "r"}));
+        assertEquals(List.of("stop"), EvilKaraokeCommandService.suggest(new String[] {"queue", "s"}));
+    }
+
+    @Test
+    void suggestsCancelAll() {
+        assertEquals(List.of("all"), EvilKaraokeCommandService.suggest(new String[] {"queue", "cancel", ""}));
+        assertEquals(List.of("all"), EvilKaraokeCommandService.suggest(new String[] {"queue", "cancel", "a"}));
+    }
+
+    @Test
+    void suggestsCollectionAddArguments() {
+        assertEquals(List.of("add", "1"), EvilKaraokeCommandService.suggest(new String[] {"playlist", ""}));
+        assertEquals(List.of("add"), EvilKaraokeCommandService.suggest(new String[] {"setlist", "a"}));
+        assertEquals(List.of("1", "2", "3", "4", "5"), EvilKaraokeCommandService.suggest(new String[] {"playlist", "add", ""}));
+        assertEquals(List.of("1", "2", "3", "4", "5"), EvilKaraokeCommandService.suggest(new String[] {"setlist", "add", "2", ""}));
+    }
+
+    @Test
+    void suggestsStatsArguments() {
+        assertEquals(List.of("me", "user", "server", "top"), EvilKaraokeCommandService.suggest(new String[] {"stats", ""}));
+        assertEquals(List.of("users", "songs"), EvilKaraokeCommandService.suggest(new String[] {"stats", "top", ""}));
+        assertEquals(List.of("played", "requested"), EvilKaraokeCommandService.suggest(new String[] {"stats", "top", "songs", ""}));
+        assertEquals(List.of("time", "song-count", "request-count"), EvilKaraokeCommandService.suggest(new String[] {"stats", "top", "users", ""}));
+    }
+
+    @Test
+    void suggestionArgsKeepTrailingEmptyToken() {
+        assertArrayEquals(new String[] {"request", ""}, EvilKaraokeCommandService.splitArgsForSuggestions("request "));
+        assertArrayEquals(new String[] {"request", "u"}, EvilKaraokeCommandService.splitArgsForSuggestions("request u"));
+        assertArrayEquals(new String[] {"queue", "move", ""}, EvilKaraokeCommandService.splitArgsForSuggestions("queue move "));
+    }
+
+    @Test
+    void suggestionTokenStartUsesCurrentTokenOffset() {
+        assertEquals(0, EvilKaraokeCommandService.suggestionTokenStart(""));
+        assertEquals(0, EvilKaraokeCommandService.suggestionTokenStart("que"));
+        assertEquals(6, EvilKaraokeCommandService.suggestionTokenStart("queue "));
+        assertEquals(6, EvilKaraokeCommandService.suggestionTokenStart("queue m"));
+        assertEquals(11, EvilKaraokeCommandService.suggestionTokenStart("queue move "));
+    }
+
+    @Test
+    void dynamicSuggestionsUseQueueAndPlayerState() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        KaraokePlayer alex = new KaraokePlayer(UUID.randomUUID(), "Alex");
+        FakePlatform platform = new FakePlatform(List.of(steve, alex));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            core.coordinator().request(track("one"), steve).join();
+            core.coordinator().request(track("two"), steve).join();
+            core.coordinator().request(track("other"), alex).join();
+
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.move",
+                    "evilkaraoke.command.queue.cancel"));
+
+            assertEquals(List.of("1", "2"), service.suggest(actor, new String[] {"queue", "move", ""}));
+            assertEquals(List.of("2"), service.suggest(actor, new String[] {"queue", "move", "1", ""}));
+            assertEquals(List.of("all", "1", "2"), service.suggest(actor, new String[] {"queue", "cancel", ""}));
+            assertEquals(List.of("Alex"), service.suggest(actor, new String[] {"audience", "a"}));
+            assertEquals(List.of("Steve"), service.suggest(actor, new String[] {"stats", "user", "s"}));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void statsMeShowsPermissionGroup() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of("evilkaraoke.command.stats"), "vip");
+
+            service.execute(actor, "ek", new String[] {"stats", "me"});
+
+            assertTrue(actor.messages().contains("Permission group: vip"));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueShowsCoveredByOnSongLines() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(coveredTrack("current", "Current Song", "Original Artist", "Neuro & Evil"), steve).join();
+            core.coordinator().request(coveredTrack("queued", "Queued Song", "Original Artist", "Neuro & Evil"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of("evilkaraoke.command.queue"));
+
+            service.execute(actor, "ek", new String[] {"queue"});
+
+            assertTrue(actor.messages().contains("Now playing: Current Song - Original Artist (covered by Neuro & Evil) (by Steve) | Elapsed: 0:00"));
+            assertTrue(actor.messages().contains("Controls: [Previous] [Next] [Random: Off] [Loop: Off]"));
+            assertTrue(actor.messages().contains("1. Queued Song - Original Artist (covered by Neuro & Evil) (by Steve) [Loop 1] [Cancel]"));
+            assertEquals("Controls: [Previous] [Next] [Random: Off] [Loop: Off]", actor.messages().getLast());
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueShowsPlaybackButtonsForCurrentSong() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.pause",
+                    "evilkaraoke.command.queue.resume",
+                    "evilkaraoke.command.queue.stop"));
+
+            service.execute(actor, "ek", new String[] {"queue"});
+            service.execute(actor, "ek", new String[] {"queue", "pause"});
+            service.execute(actor, "ek", new String[] {"queue"});
+
+            assertTrue(actor.messages().contains("Now playing: Song current - Artist (by Steve) | Elapsed: 0:00 [Pause] [Stop]"));
+            assertTrue(actor.messages().contains("Now playing: Song current - Artist (by Steve) | Elapsed: 0:00 [Resume] [Stop]"));
+            assertTrue(actor.messages().contains("Controls: [Previous] [Next] [Random: Off] [Loop: Off]"));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueModeCommandsToggleRandomLoopAndSingleLoop() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            core.coordinator().request(track("queued"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.random",
+                    "evilkaraoke.command.queue.loop"));
+
+            service.execute(actor, "ek", new String[] {"queue", "random"});
+            service.execute(actor, "ek", new String[] {"queue", "loop"});
+            service.execute(actor, "ek", new String[] {"queue", "loop", "1"});
+            service.execute(actor, "ek", new String[] {"queue"});
+
+            assertTrue(actor.messages().contains("Random queue playback enabled."));
+            assertTrue(actor.messages().contains("Queue loop enabled."));
+            assertTrue(actor.messages().contains("Single-song loop enabled: Song queued - Artist"));
+            assertTrue(actor.messages().contains("Controls: [Previous] [Next] [Random: On] [Loop: On]"));
+            assertTrue(actor.messages().contains("1. Song queued - Artist (by Steve) [Loop 1: On] [Cancel]"));
+            assertEquals("Controls: [Previous] [Next] [Random: On] [Loop: On]", actor.messages().getLast());
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueCancelRemovesQueuedSong() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            core.coordinator().request(track("queued"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.cancel"));
+
+            service.execute(actor, "ek", new String[] {"queue", "cancel", "1"});
+
+            assertTrue(actor.messages().contains("Removed from queue: Song queued - Artist"));
+            assertEquals(0, core.coordinator().queue().size());
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueNavigationCommandsControlPlayback() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.next",
+                    "evilkaraoke.command.queue.previous"));
+
+            service.execute(actor, "ek", new String[] {"queue", "next"});
+            service.execute(actor, "ek", new String[] {"queue", "previous"});
+
+            assertTrue(actor.messages().contains("Skipping to next track."));
+            assertTrue(actor.messages().contains("Going back to previous track."));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueRefreshTokenRedrawsUiWithoutConfirmationMessage() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.random"));
+
+            service.execute(actor, "ek", new String[] {"queue", "random", "--refresh=1"});
+
+            assertFalse(actor.messages().contains("Random queue playback enabled."));
+            assertTrue(actor.messages().contains("Queue (page 1/1)"));
+            assertEquals("Controls: [Previous] [Next] [Random: On] [Loop: Off]", actor.messages().getLast());
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void queueStopRefreshStopsCurrentPlaybackWithoutCancellingUpcomingQueue() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            core.coordinator().request(track("current"), steve).join();
+            core.coordinator().request(track("queued"), steve).join();
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.stop"));
+
+            service.execute(actor, "ek", new String[] {"queue", "stop", "--refresh=1"});
+
+            assertFalse(actor.messages().contains("Playback stopped."));
+            assertEquals(PlaybackState.IDLE, core.coordinator().snapshot().state());
+            assertEquals(List.of("queued"), core.coordinator().snapshot().requests().stream()
+                    .map(queued -> queued.track().id())
+                    .toList());
+            assertTrue(actor.messages().contains("Queue (page 1/1)"));
+            assertTrue(actor.messages().contains("1. Song queued - Artist (by Steve) [Loop 1] [Cancel]"));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void rootControlAliasesAreNotAccepted() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of(
+                    "evilkaraoke.command.queue",
+                    "evilkaraoke.command.queue.cancel",
+                    "evilkaraoke.command.queue.pause",
+                    "evilkaraoke.command.queue.resume",
+                    "evilkaraoke.command.queue.stop"));
+
+            service.execute(actor, "ek", new String[] {"pause"});
+            service.execute(actor, "ek", new String[] {"resume"});
+            service.execute(actor, "ek", new String[] {"stop"});
+            service.execute(actor, "ek", new String[] {"cancel", "all"});
+            service.execute(actor, "ek", new String[] {"previous"});
+            service.execute(actor, "ek", new String[] {"next"});
+
+            assertEquals(List.of(
+                    "Unknown Evilkaraoke subcommand. Try /ek help.",
+                    "Unknown Evilkaraoke subcommand. Try /ek help.",
+                    "Unknown Evilkaraoke subcommand. Try /ek help.",
+                    "Unknown Evilkaraoke subcommand. Try /ek help.",
+                    "Unknown Evilkaraoke subcommand. Try /ek help.",
+                    "Unknown Evilkaraoke subcommand. Try /ek help."),
+                    actor.messages());
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void statsUserFallsBackToStoredStatsForOfflinePlayer() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            UUID alex = UUID.randomUUID();
+            core.statsService().recordRequest(alex, "Alex", "song-a", "Song A");
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of("evilkaraoke.command.stats"));
+
+            service.execute(actor, "ek", new String[] {"stats", "user", "alex"});
+
+            assertTrue(actor.messages().contains("Evilkaraoke stats for Alex"));
+            assertTrue(actor.messages().contains("Songs requested: 1"));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void requestDoesNotEnforcePerUserQueueLimit() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            for (int i = 0; i < 6; i++) {
+                core.coordinator().request(track("song-" + i), steve).join();
+            }
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of("evilkaraoke.command.request"));
+
+            service.execute(actor, "ek", new String[] {"request"});
+
+            assertTrue(actor.messages().contains("Usage: /ek request <query> | /ek request id <songId> | /ek request url <https://...> [title]"));
+        } finally {
+            core.disable();
+        }
+    }
+
+    private static KaraokeTrack track(String id) {
+        return new KaraokeTrack(
+                id,
+                TrackType.SONG,
+                "Song " + id,
+                "Artist",
+                new AudioAsset("https://audio.example/" + id + ".opus", AudioFormat.OPUS),
+                null,
+                Duration.ofSeconds(60));
+    }
+
+    private static KaraokeTrack coveredTrack(String id, String title, String artist, String coverArtists) {
+        return new KaraokeTrack(
+                id,
+                TrackType.SONG,
+                title,
+                artist,
+                coverArtists,
+                new AudioAsset("https://audio.example/" + id + ".opus", AudioFormat.OPUS),
+                null,
+                Duration.ofSeconds(60));
+    }
+
+    private record TestActor(KaraokePlayer player, List<String> permissions, String group, List<String> messages) implements CommandActor {
+        private TestActor(KaraokePlayer player, List<String> permissions) {
+            this(player, permissions, "default");
+        }
+
+        private TestActor(KaraokePlayer player, List<String> permissions, String group) {
+            this(player, permissions, group, new java.util.ArrayList<>());
+        }
+
+        @Override
+        public boolean isPlayer() {
+            return true;
+        }
+
+        @Override
+        public UUID playerId() {
+            return player.id();
+        }
+
+        @Override
+        public String name() {
+            return player.name();
+        }
+
+        @Override
+        public boolean hasPermission(String permission) {
+            return permissions.contains(permission);
+        }
+
+        @Override
+        public String group() {
+            return group;
+        }
+
+        @Override
+        public void sendMessage(String message) {
+            messages.add(message);
+        }
+    }
+
+    private static final class FakePlatform implements ServerPlaybackPlatform {
+        private final List<KaraokePlayer> players;
+
+        private FakePlatform(List<KaraokePlayer> players) {
+            this.players = players;
+        }
+
+        @Override
+        public void runNow(Runnable task) {
+            task.run();
+        }
+
+        @Override
+        public int runLater(Runnable task, long delayTicks) {
+            return 1;
+        }
+
+        @Override
+        public void cancelTask(int taskId) {
+        }
+
+        @Override
+        public Collection<KaraokePlayer> onlinePlayers() {
+            return players;
+        }
+
+        @Override
+        public Optional<KaraokePlayer> player(UUID playerId) {
+            return players.stream().filter(player -> player.id().equals(playerId)).findFirst();
+        }
+
+        @Override
+        public Optional<KaraokePlayer> player(String exactName) {
+            return players.stream().filter(player -> player.name().equals(exactName)).findFirst();
+        }
+
+        @Override
+        public void sendAudio(KaraokePlayer player, ProtocolPacket packet) {
+        }
+
+        @Override
+        public void log(Level level, String message, Throwable error) {
+        }
+    }
+}

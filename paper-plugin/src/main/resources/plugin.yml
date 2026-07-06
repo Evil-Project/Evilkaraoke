@@ -1,0 +1,67 @@
+name: Evilkaraoke
+version: ${version}
+main: org.evilproject.evilkaraoke.paper.EvilKaraokePlugin
+api-version: '26.2'
+description: Server-authoritative Neurokaraoke playback for Minecraft clients.
+author: Evil-Project
+website: https://github.com/Evil-Project/Evilkaraoke
+softdepend: [LuckPerms]
+commands:
+  ek:
+    description: Control Evilkaraoke playback.
+    usage: /<command> help
+permissions:
+  evilkaraoke.command.help:
+    default: true
+  evilkaraoke.command.search:
+    default: true
+  evilkaraoke.command.request:
+    default: true
+  evilkaraoke.command.randomsong:
+    default: true
+  evilkaraoke.command.setlist:
+    default: true
+  evilkaraoke.command.playlist:
+    default: true
+  evilkaraoke.command.issue:
+    default: true
+  evilkaraoke.command.queue:
+    default: true
+  evilkaraoke.command.queue.move:
+    default: true
+  evilkaraoke.command.queue.cancel:
+    default: true
+  evilkaraoke.command.queue.random:
+    default: true
+  evilkaraoke.command.queue.loop:
+    default: true
+  evilkaraoke.command.queue.pause:
+    default: op
+  evilkaraoke.command.queue.resume:
+    default: op
+  evilkaraoke.command.queue.previous:
+    default: op
+  evilkaraoke.command.queue.next:
+    default: op
+  evilkaraoke.command.queue.stop:
+    default: op
+  evilkaraoke.command.current:
+    default: true
+  evilkaraoke.command.stats:
+    default: true
+  evilkaraoke.command.radio:
+    default: true
+  evilkaraoke.command.audience:
+    default: op
+  evilkaraoke.command.reload:
+    default: op
+  evilkaraoke.command.doctor:
+    default: op
+  evilkaraoke.command.listeners:
+    default: op
+  evilkaraoke.admin.queue.cancel:
+    default: op
+    description: Allows canceling any song in the queue, not just your own
+  evilkaraoke.admin.queue.move:
+    default: op
+    description: Allows reordering any requested song in the queue, not just your own

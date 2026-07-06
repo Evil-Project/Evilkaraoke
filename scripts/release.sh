@@ -27,14 +27,14 @@ echo "✓ Build successful"
 # Create release directory
 echo "[2/5] Creating release directory..."
 rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"/{server,client-fabric,client-neoforge}
+mkdir -p "$BUILD_DIR"/{server,fabric-mod,neoforge-mod}
 echo "✓ Release directory ready"
 
 # Package server
 echo "[3/5] Packaging server plugin..."
-cp server-paper/build/libs/Evilkaraoke-Paper-$VERSION.jar "$BUILD_DIR/server/Evilkaraoke-Paper-$VERSION.jar"
+cp paper-plugin/build/libs/Evilkaraoke-Paper-$VERSION.jar "$BUILD_DIR/server/Evilkaraoke-Paper-$VERSION.jar"
 cp README.md "$BUILD_DIR/server/"
-cp server-paper/src/main/resources/config.yml "$BUILD_DIR/server/config-example.yml"
+cp paper-plugin/src/main/resources/config.yml "$BUILD_DIR/server/config-example.yml"
 cat > "$BUILD_DIR/server/README.txt" << EOF
 Evilkaraoke Server Plugin - Version $VERSION
 
@@ -63,8 +63,8 @@ echo "✓ Server package ready: $BUILD_DIR/server/"
 
 # Package Fabric client
 echo "[4/5] Packaging Fabric client mod..."
-cp client-fabric/build/libs/Evilkaraoke-Fabric-$VERSION.jar "$BUILD_DIR/client-fabric/Evilkaraoke-Fabric-$VERSION.jar"
-cat > "$BUILD_DIR/client-fabric/README.txt" << EOF
+cp fabric-mod/build/libs/Evilkaraoke-Fabric-$VERSION.jar "$BUILD_DIR/fabric-mod/Evilkaraoke-Fabric-$VERSION.jar"
+cat > "$BUILD_DIR/fabric-mod/README.txt" << EOF
 Evilkaraoke Fabric Client Mod - Version $VERSION
 
 Installation:
@@ -81,12 +81,12 @@ No configuration needed on the client side.
 
 For support, see the server README.md.
 EOF
-echo "✓ Fabric package ready: $BUILD_DIR/client-fabric/"
+echo "✓ Fabric package ready: $BUILD_DIR/fabric-mod/"
 
 # Package NeoForge client
 echo "[5/5] Packaging NeoForge client mod..."
-cp client-neoforge/build/libs/Evilkaraoke-NeoForge-$VERSION.jar "$BUILD_DIR/client-neoforge/Evilkaraoke-NeoForge-$VERSION.jar"
-cat > "$BUILD_DIR/client-neoforge/README.txt" << EOF
+cp neoforge-mod/build/libs/Evilkaraoke-NeoForge-$VERSION.jar "$BUILD_DIR/neoforge-mod/Evilkaraoke-NeoForge-$VERSION.jar"
+cat > "$BUILD_DIR/neoforge-mod/README.txt" << EOF
 Evilkaraoke NeoForge Client Mod - Version $VERSION
 
 Installation:
@@ -103,15 +103,15 @@ No configuration needed on the client side.
 
 For support, see the server README.md.
 EOF
-echo "✓ NeoForge package ready: $BUILD_DIR/client-neoforge/"
+echo "✓ NeoForge package ready: $BUILD_DIR/neoforge-mod/"
 
 # Create archives
 echo ""
 echo "Creating distribution archives..."
 cd "$BUILD_DIR"
 tar czf "Evilkaraoke-Server-$VERSION.tar.gz" server/
-tar czf "Evilkaraoke-Fabric-$VERSION.tar.gz" client-fabric/
-tar czf "Evilkaraoke-NeoForge-$VERSION.tar.gz" client-neoforge/
+tar czf "Evilkaraoke-Fabric-$VERSION.tar.gz" fabric-mod/
+tar czf "Evilkaraoke-NeoForge-$VERSION.tar.gz" neoforge-mod/
 
 # Summary
 echo ""
@@ -129,8 +129,8 @@ echo "  - Evilkaraoke-NeoForge-$VERSION.tar.gz"
 echo ""
 echo "Individual JARs also available in:"
 echo "  - server/Evilkaraoke-Paper-$VERSION.jar"
-echo "  - client-fabric/Evilkaraoke-Fabric-$VERSION.jar"
-echo "  - client-neoforge/Evilkaraoke-NeoForge-$VERSION.jar"
+echo "  - fabric-mod/Evilkaraoke-Fabric-$VERSION.jar"
+echo "  - neoforge-mod/Evilkaraoke-NeoForge-$VERSION.jar"
 echo ""
 echo "File sizes:"
 du -h ./*.tar.gz | awk '{print "  - " $2 ": " $1}'

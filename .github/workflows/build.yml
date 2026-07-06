@@ -57,9 +57,9 @@ jobs:
           name: Evilkaraoke
           if-no-files-found: error
           path: |
-            server-paper/build/libs/Evilkaraoke-Paper-*.jar
-            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
-            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
+            paper-plugin/build/libs/Evilkaraoke-Paper-*.jar
+            fabric-mod/build/libs/Evilkaraoke-Fabric-*.jar
+            neoforge-mod/build/libs/Evilkaraoke-NeoForge-*.jar
             !**/*-sources.jar
             !**/*-javadoc.jar
 
@@ -71,9 +71,7 @@ jobs:
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
 
           files: |
-            client-fabric/build/libs/Evilkaraoke-Fabric-*.jar
-            !**/*-sources.jar
-            !**/*-javadoc.jar
+            fabric-mod/build/libs/Evilkaraoke-Fabric-${{ steps.release-version.outputs.version }}.jar
 
           loaders: |
             fabric
@@ -93,9 +91,7 @@ jobs:
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
 
           files: |
-            client-neoforge/build/libs/Evilkaraoke-NeoForge-*.jar
-            !**/*-sources.jar
-            !**/*-javadoc.jar
+            neoforge-mod/build/libs/Evilkaraoke-NeoForge-${{ steps.release-version.outputs.version }}.jar
 
           loaders: |
             neoforge
@@ -115,9 +111,7 @@ jobs:
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
 
           files: |
-            server-paper/build/libs/Evilkaraoke-Paper-*.jar
-            !**/*-sources.jar
-            !**/*-javadoc.jar
+            paper-plugin/build/libs/Evilkaraoke-Paper-${{ steps.release-version.outputs.version }}.jar
 
           loaders: |
             paper

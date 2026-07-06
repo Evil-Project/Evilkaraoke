@@ -26,6 +26,15 @@ subprojects {
         withSourcesJar()
     }
 
+    tasks.named<Jar>("sourcesJar") {
+        exclude(
+            "fabric.mod.json",
+            "META-INF/neoforge.mods.toml",
+            "plugin.yml",
+            "paper-plugin.yml"
+        )
+    }
+
     tasks.withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
         options.release.set(25)
