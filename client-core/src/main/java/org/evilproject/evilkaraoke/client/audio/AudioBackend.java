@@ -9,6 +9,10 @@ public interface AudioBackend {
 
     void playStream(AudioCommandPacket packet, InputStream source);
 
+    default void playPcmStream(AudioCommandPacket packet, InputStream source, float sampleRate, int channels, int bitsPerSample) {
+        playStream(packet, source);
+    }
+
     void pause(AudioCommandPacket packet);
 
     void resume(AudioCommandPacket packet);

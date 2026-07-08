@@ -1,14 +1,21 @@
 package org.evilproject.evilkaraoke.server.core;
 
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
+import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
+import org.evilproject.evilkaraoke.common.protocol.PacketDebugFormatter;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.evilproject.evilkaraoke.server.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.server.config.EvilKaraokeConfig;
@@ -26,6 +33,8 @@ public final class EvilKaraokeServerCore {
     private final ServerPlaybackPlatform platform;
     private final JsonPacketCodec packetCodec = new JsonPacketCodec();
     private final ClientRegistry clientRegistry = new ClientRegistry();
+    private final Map<UUID, List<KaraokeTrack>> randomSongSelections = new ConcurrentHashMap<>();
+    private final Map<UUID, List<KaraokeTrack>> searchResultSelections = new ConcurrentHashMap<>();
 
     private EvilKaraokeServerConfig serverConfig;
     private NeurokaraokeClient neurokaraokeClient;
@@ -85,6 +94,9 @@ public final class EvilKaraokeServerCore {
         }
         try {
             ProtocolPacket packet = packetCodec.decode(payload);
+            if (config().debugPackets()) {
+                logger.info("Evilkaraoke debug packet IN " + channel + " from " + player.name() + ": " + PacketDebugFormatter.describe(packet));
+            }
             if (packet instanceof ClientHelloPacket hello) {
                 clientRegistry.register(player.id(), hello);
                 logger.info("Registered Evilkaraoke client for " + player.name() + " (" + hello.loader() + " " + hello.modVersion() + ")");
@@ -127,5 +139,21 @@ public final class EvilKaraokeServerCore {
 
     public PlaybackCoordinator coordinator() {
         return coordinator;
+    }
+
+    public void rememberRandomSongSelection(UUID playerId, List<KaraokeTrack> tracks) {
+        randomSongSelections.put(playerId, List.copyOf(tracks));
+    }
+
+    public Optional<List<KaraokeTrack>> randomSongSelection(UUID playerId) {
+        return Optional.ofNullable(randomSongSelections.get(playerId));
+    }
+
+    public void rememberSearchResultSelection(UUID playerId, List<KaraokeTrack> tracks) {
+        searchResultSelections.put(playerId, List.copyOf(tracks));
+    }
+
+    public Optional<List<KaraokeTrack>> searchResultSelection(UUID playerId) {
+        return Optional.ofNullable(searchResultSelections.get(playerId));
     }
 }

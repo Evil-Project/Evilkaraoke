@@ -1,10 +1,15 @@
 package org.evilproject.evilkaraoke.server.command;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collection;
@@ -25,6 +30,7 @@ import org.evilproject.evilkaraoke.server.platform.KaraokePlayer;
 import org.evilproject.evilkaraoke.server.platform.ServerPlaybackPlatform;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import com.sun.net.httpserver.HttpServer;
 
 class EvilKaraokeCommandServiceTest {
     @TempDir
@@ -34,6 +40,13 @@ class EvilKaraokeCommandServiceTest {
     void suggestsRequestModes() {
         assertEquals(List.of("id", "url"), EvilKaraokeCommandService.suggest(new String[] {"request", ""}));
         assertEquals(List.of("url"), EvilKaraokeCommandService.suggest(new String[] {"request", "u"}));
+    }
+
+    @Test
+    void suggestsRandomSongQueueActions() {
+        assertEquals(List.of("queue", "1"), EvilKaraokeCommandService.suggest(new String[] {"randomsong", ""}));
+        assertEquals(List.of("all", "1", "2", "3", "4", "5"), EvilKaraokeCommandService.suggest(new String[] {"randomsong", "queue", ""}));
+        assertEquals(List.of("all"), EvilKaraokeCommandService.suggest(new String[] {"randomsong", "queue", "a"}));
     }
 
     @Test
@@ -203,7 +216,7 @@ class EvilKaraokeCommandServiceTest {
             service.execute(actor, "ek", new String[] {"queue", "loop", "1"});
             service.execute(actor, "ek", new String[] {"queue"});
 
-            assertTrue(actor.messages().contains("Random queue playback enabled."));
+            assertTrue(actor.messages().contains("Random queue order shuffled."));
             assertTrue(actor.messages().contains("Queue loop enabled."));
             assertTrue(actor.messages().contains("Single-song loop enabled: Song queued - Artist"));
             assertTrue(actor.messages().contains("Controls: [Previous] [Next] [Random: On] [Loop: On]"));
@@ -245,10 +258,7 @@ class EvilKaraokeCommandServiceTest {
         core.enable();
         try {
             EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
-            TestActor actor = new TestActor(steve, List.of(
-                    "evilkaraoke.command.queue",
-                    "evilkaraoke.command.queue.next",
-                    "evilkaraoke.command.queue.previous"));
+            TestActor actor = new TestActor(steve, List.of("evilkaraoke.command.queue"));
 
             service.execute(actor, "ek", new String[] {"queue", "next"});
             service.execute(actor, "ek", new String[] {"queue", "previous"});
@@ -275,7 +285,7 @@ class EvilKaraokeCommandServiceTest {
 
             service.execute(actor, "ek", new String[] {"queue", "random", "--refresh=1"});
 
-            assertFalse(actor.messages().contains("Random queue playback enabled."));
+            assertFalse(actor.messages().contains("Random queue order shuffled."));
             assertTrue(actor.messages().contains("Queue (page 1/1)"));
             assertEquals("Controls: [Previous] [Next] [Random: On] [Loop: Off]", actor.messages().getLast());
         } finally {
@@ -386,6 +396,205 @@ class EvilKaraokeCommandServiceTest {
         } finally {
             core.disable();
         }
+    }
+
+    @Test
+    void randomSongShowsPlaylistAndQueuesSelectedRows() throws IOException, InterruptedException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/random", exchange -> {
+            byte[] response = """
+                    [{
+                      "id": "random-1",
+                      "title": "First Random",
+                      "originalArtists": ["Artist One"],
+                      "coverArtists": ["Neuro"],
+                      "opus": "first.ogg"
+                    }, {
+                      "id": "random-2",
+                      "title": "Second Random",
+                      "originalArtists": ["Artist Two"],
+                      "coverArtists": ["Evil"],
+                      "opus": "second.ogg"
+                    }, {
+                      "id": "random-3",
+                      "title": "Third Random",
+                      "originalArtists": ["Artist Three"],
+                      "coverArtists": ["Neuro"],
+                      "opus": "third.ogg"
+                    }, {
+                      "id": "random-4",
+                      "title": "Fourth Random",
+                      "originalArtists": ["Artist Four"],
+                      "coverArtists": ["Evil"],
+                      "opus": "fourth.ogg"
+                    }, {
+                      "id": "random-5",
+                      "title": "Fifth Random",
+                      "originalArtists": ["Artist Five"],
+                      "coverArtists": ["Neuro"],
+                      "opus": "fifth.ogg"
+                    }, {
+                      "id": "random-6",
+                      "title": "Sixth Random",
+                      "originalArtists": ["Artist Six"],
+                      "coverArtists": ["Evil"],
+                      "opus": "sixth.ogg"
+                    }]
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Files.writeString(tempDir.resolve("evilkaraoke.json"), """
+                    {
+                      "api": {
+                        "timeoutMillis": 1000,
+                        "retries": 0,
+                        "retryDelayMillis": 0,
+                        "randomUrl": "http://localhost:%d/random",
+                        "audioBaseUrl": "https://audio.example/"
+                      },
+                      "playback": {
+                        "randomCacheSize": 2,
+                        "requireClientMod": false
+                      }
+                    }
+                    """.formatted(server.getAddress().getPort()), StandardCharsets.UTF_8);
+            KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+            KaraokePlayer alex = new KaraokePlayer(UUID.randomUUID(), "Alex");
+            FakePlatform platform = new FakePlatform(List.of(steve, alex));
+            EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+            core.enable();
+            try {
+                EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+                TestActor actor = new TestActor(steve, List.of(
+                        "evilkaraoke.command.randomsong",
+                        "evilkaraoke.command.request"));
+
+                service.execute(actor, "ek", new String[] {"randomsong"});
+                waitUntil(() -> actor.messages().size() >= 7);
+
+                assertEquals("Random songs (page 1/2): [Queue All]", actor.messages().get(0));
+                assertEquals("1. First Random - Artist One (covered by Neuro) [Queue]", actor.messages().get(1));
+                assertEquals("2. Second Random - Artist Two (covered by Evil) [Queue]", actor.messages().get(2));
+                assertEquals("5. Fifth Random - Artist Five (covered by Neuro) [Queue]", actor.messages().get(5));
+                assertEquals("[Next]", actor.messages().get(6));
+                assertTrue(core.coordinator().snapshot().current() == null);
+                assertTrue(core.coordinator().snapshot().requests().isEmpty());
+
+                service.execute(actor, "ek", new String[] {"randomsong", "2"});
+                assertTrue(actor.messages().contains("Random songs (page 2/2): [Queue All]"));
+                assertTrue(actor.messages().contains("6. Sixth Random - Artist Six (covered by Evil) [Queue]"));
+
+                service.execute(actor, "ek", new String[] {"randomsong", "queue", "6"});
+
+                assertTrue(actor.messages().contains("Queued random song: Sixth Random - Artist Six (covered by Evil)"));
+                assertNotNull(core.coordinator().snapshot().current());
+                assertEquals("random-6", core.coordinator().snapshot().current().track().id());
+
+                TestActor alexActor = new TestActor(alex, List.of(
+                        "evilkaraoke.command.randomsong",
+                        "evilkaraoke.command.request"));
+                service.execute(alexActor, "ek", new String[] {"randomsong"});
+                waitUntil(() -> alexActor.messages().size() >= 7);
+                service.execute(alexActor, "ek", new String[] {"randomsong", "queue", "all"});
+
+                assertTrue(alexActor.messages().contains("Queued 6 random song(s)."));
+                assertEquals(List.of("random-1", "random-2", "random-3", "random-4", "random-5", "random-6"), core.coordinator().snapshot().requests().stream()
+                        .map(queued -> queued.track().id())
+                        .toList());
+            } finally {
+                core.disable();
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void searchQueueAllQueuesLatestShownPage() throws IOException, InterruptedException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/search", exchange -> {
+            byte[] response = """
+                    {
+                      "items": [{
+                        "id": "search-1",
+                        "title": "First Search",
+                        "originalArtists": ["Artist One"],
+                        "coverArtists": ["Neuro"],
+                        "opus": "first.ogg"
+                      }, {
+                        "id": "search-2",
+                        "title": "Second Search",
+                        "originalArtists": ["Artist Two"],
+                        "coverArtists": ["Evil"],
+                        "opus": "second.ogg"
+                      }]
+                    }
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Files.writeString(tempDir.resolve("evilkaraoke.json"), """
+                    {
+                      "api": {
+                        "timeoutMillis": 1000,
+                        "retries": 0,
+                        "retryDelayMillis": 0,
+                        "searchUrl": "http://localhost:%d/search",
+                        "audioBaseUrl": "https://audio.example/"
+                      },
+                      "playback": {
+                        "requireClientMod": false
+                      }
+                    }
+                    """.formatted(server.getAddress().getPort()), StandardCharsets.UTF_8);
+            KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+            FakePlatform platform = new FakePlatform(List.of(steve));
+            EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+            core.enable();
+            try {
+                EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+                TestActor actor = new TestActor(steve, List.of(
+                        "evilkaraoke.command.search",
+                        "evilkaraoke.command.request"));
+
+                service.execute(actor, "ek", new String[] {"search", "hello"});
+                waitUntil(() -> actor.messages().size() >= 3);
+
+                assertEquals("Results for \"hello\" (page 1): [Queue All]", actor.messages().get(0));
+                assertEquals("- First Search - Artist One (covered by Neuro) [Request]", actor.messages().get(1));
+                assertEquals("- Second Search - Artist Two (covered by Evil) [Request]", actor.messages().get(2));
+
+                service.execute(actor, "ek", new String[] {"search", "queue-all"});
+
+                assertTrue(actor.messages().contains("Queued 2 search result song(s)."));
+                assertNotNull(core.coordinator().snapshot().current());
+                assertEquals("search-1", core.coordinator().snapshot().current().track().id());
+                assertEquals(List.of("search-2"), core.coordinator().snapshot().requests().stream()
+                        .map(queued -> queued.track().id())
+                        .toList());
+            } finally {
+                core.disable();
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static void waitUntil(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        assertTrue(condition.getAsBoolean());
     }
 
     private static KaraokeTrack track(String id) {

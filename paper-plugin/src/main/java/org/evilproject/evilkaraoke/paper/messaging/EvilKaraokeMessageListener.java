@@ -1,5 +1,6 @@
 package org.evilproject.evilkaraoke.paper.messaging;
 
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 
 import org.bukkit.entity.Player;
@@ -10,6 +11,7 @@ import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
 import org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
+import org.evilproject.evilkaraoke.common.protocol.PacketDebugFormatter;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.jetbrains.annotations.NotNull;
 
@@ -20,12 +22,14 @@ public final class EvilKaraokeMessageListener implements PluginMessageListener {
     private final ClientRegistry clientRegistry;
     private final JsonPacketCodec codec;
     private final PlaybackCoordinator coordinator;
+    private final BooleanSupplier debugPackets;
 
-    public EvilKaraokeMessageListener(Plugin plugin, ClientRegistry clientRegistry, JsonPacketCodec codec, PlaybackCoordinator coordinator) {
+    public EvilKaraokeMessageListener(Plugin plugin, ClientRegistry clientRegistry, JsonPacketCodec codec, PlaybackCoordinator coordinator, BooleanSupplier debugPackets) {
         this.plugin = plugin;
         this.clientRegistry = clientRegistry;
         this.codec = codec;
         this.coordinator = coordinator;
+        this.debugPackets = debugPackets;
     }
 
     @Override
@@ -36,6 +40,9 @@ public final class EvilKaraokeMessageListener implements PluginMessageListener {
 
         try {
             ProtocolPacket packet = codec.decode(message);
+            if (debugPackets.getAsBoolean()) {
+                plugin.getLogger().info("Evilkaraoke debug packet IN " + channel + " from " + player.getName() + ": " + PacketDebugFormatter.describe(packet));
+            }
             if (packet instanceof ClientHelloPacket hello) {
                 clientRegistry.register(player.getUniqueId(), hello);
                 plugin.getLogger().info("Registered Evilkaraoke client for " + player.getName() + " (" + hello.loader() + " " + hello.modVersion() + ")");

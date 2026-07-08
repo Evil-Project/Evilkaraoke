@@ -48,6 +48,24 @@ class ServerStreamQualitySelectorTest {
     }
 
     @Test
+    void unknownClientHealthDefaultsToHighQuality() {
+        ServerStreamQualitySelector.Selection selection = ServerStreamQualitySelector.select(
+                track(),
+                List.of(new ClientHealth(-1, 0L, 0L, 0, 0L)));
+
+        assertEquals(StreamQuality.HIGH_QUALITY, selection.quality());
+        assertEquals("https://audio.example/high.wav", selection.track().primaryAsset().url());
+    }
+
+    @Test
+    void noClientHealthDefaultsToHighQuality() {
+        ServerStreamQualitySelector.Selection selection = ServerStreamQualitySelector.select(track(), List.of());
+
+        assertEquals(StreamQuality.HIGH_QUALITY, selection.quality());
+        assertEquals("https://audio.example/high.wav", selection.track().primaryAsset().url());
+    }
+
+    @Test
     void singleAssetTrackKeepsPrimaryAsset() {
         KaraokeTrack singleAsset = new KaraokeTrack(
                 "song",

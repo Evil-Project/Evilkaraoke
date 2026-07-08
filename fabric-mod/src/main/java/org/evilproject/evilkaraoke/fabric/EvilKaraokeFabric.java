@@ -242,6 +242,7 @@ public final class EvilKaraokeFabric implements ModInitializer {
                 || lower.startsWith("moved")
                 || lower.startsWith("playback ")
                 || lower.startsWith("random queue playback")
+                || lower.startsWith("random queue order")
                 || lower.startsWith("queue loop")
                 || lower.startsWith("single-song loop")
                 || lower.startsWith("going back")
@@ -293,8 +294,6 @@ public final class EvilKaraokeFabric implements ModInitializer {
                 || "evilkaraoke.command.audience".equals(permission)
                 || "evilkaraoke.command.queue.pause".equals(permission)
                 || "evilkaraoke.command.queue.resume".equals(permission)
-                || "evilkaraoke.command.queue.previous".equals(permission)
-                || "evilkaraoke.command.queue.next".equals(permission)
                 || "evilkaraoke.command.queue.stop".equals(permission);
     }
 

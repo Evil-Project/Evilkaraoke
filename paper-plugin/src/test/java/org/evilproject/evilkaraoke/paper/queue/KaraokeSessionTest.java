@@ -1,6 +1,7 @@
 package org.evilproject.evilkaraoke.paper.queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -245,5 +246,27 @@ class KaraokeSessionTest {
         assertEquals(false, session.snapshot().randomEnabled());
         assertTrue(session.toggleRandom());
         assertEquals(true, session.snapshot().randomEnabled());
+    }
+
+    @Test
+    void randomToggleShufflesQueueAndPlaybackFollowsShownOrder() {
+        KaraokeSession session = new KaraokeSession();
+        UUID steveId = UUID.randomUUID();
+        session.request(track("a"), steveId, "Steve");
+        session.request(track("b"), steveId, "Steve");
+        session.request(track("c"), steveId, "Steve");
+
+        List<String> originalOrder = session.queuedTracks().stream()
+                .map(queued -> queued.track().id())
+                .toList();
+
+        assertTrue(session.toggleRandom());
+
+        List<String> shuffledOrder = session.queuedTracks().stream()
+                .map(queued -> queued.track().id())
+                .toList();
+        assertNotEquals(originalOrder, shuffledOrder);
+        assertEquals(shuffledOrder.get(0), session.next().orElseThrow().track().id());
+        assertEquals(shuffledOrder.get(1), session.next().orElseThrow().track().id());
     }
 }

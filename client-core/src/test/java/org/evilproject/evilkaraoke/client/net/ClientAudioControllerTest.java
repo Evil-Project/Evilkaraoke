@@ -48,7 +48,11 @@ class ClientAudioControllerTest {
     }
 
     private AudioCommandPacket serverStreamPacket() {
-        return new AudioCommandPacket(AudioCommandType.PLAY, "global", "stream-1", track(), PlaybackTarget.allPlayers(),
+        return serverStreamPacket("stream-1");
+    }
+
+    private AudioCommandPacket serverStreamPacket(String playbackId) {
+        return new AudioCommandPacket(AudioCommandType.PLAY, "global", playbackId, track(), PlaybackTarget.allPlayers(),
                 Duration.ZERO, Instant.EPOCH, "", Duration.ZERO, AudioDeliveryMode.SERVER_STREAM);
     }
 
@@ -99,13 +103,31 @@ class ClientAudioControllerTest {
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
 
         controller.handleAudioPayload(codec.encode(serverStreamPacket()));
-        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 2, new byte[] {1}, 1)));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 0, new byte[] {1}, 1)));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 3, new byte[] {1}, 1)));
 
         ClientStatusPacket status = status(controller);
         assertEquals(2L, status.streamMissingChunks());
-        assertEquals(0L, status.streamBytesReceived());
-        assertEquals(0, status.streamQueuedBytes());
+        assertEquals(1L, status.streamBytesReceived());
         assertThrows(IOException.class, () -> backend.serverStream.read());
+    }
+
+    @Test
+    void firstChunkOfRejoinSyncStreamBaselinesSequenceInsteadOfFailing() throws Exception {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+
+        // A rejoining client attaches to the global stream mid-track: the first
+        // chunk it sees carries whatever sequence the relay is at, not 0.
+        controller.handleAudioPayload(codec.encode(serverStreamPacket()));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 42, new byte[] {1, 2}, 2)));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 43, new byte[] {3}, 1)));
+
+        ClientStatusPacket status = status(controller);
+        assertEquals(0L, status.streamMissingChunks());
+        assertEquals(3L, status.streamBytesReceived());
+        assertEquals(List.of("play-stream"), backend.calls);
+        assertEquals(1, backend.serverStream.read());
     }
 
     @Test
@@ -125,6 +147,7 @@ class ClientAudioControllerTest {
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
 
         controller.handleAudioPayload(codec.encode(serverStreamPacket()));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 0, new byte[] {1}, 1)));
         InputStream serverStream = backend.serverStream;
         assertNotNull(serverStream);
 
@@ -138,11 +161,61 @@ class ClientAudioControllerTest {
                 Instant.EPOCH,
                 "stop",
                 Duration.ZERO)));
-        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 0, new byte[] {1}, 1)));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-1", 1, new byte[] {1}, 1)));
 
         assertEquals(List.of("play-stream", "stop"), backend.calls);
         assertEquals("none", status(controller).playbackId());
         assertEquals(-1, serverStream.read());
+    }
+
+    @Test
+    void pendingServerStreamReportsBufferingInsteadOfPreviousTerminalState() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+
+        // Previous track finished; the backend is parked in a terminal state.
+        backend.status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+
+        // New server-stream track dispatched, but no chunk has arrived yet. The
+        // status tick must not pair the new playbackId with the stale STOPPED
+        // state, or the server would treat the new track as finished and skip
+        // through the whole queue.
+        controller.handleAudioPayload(codec.encode(serverStreamPacket("stream-2")));
+
+        ClientStatusPacket status = status(controller);
+        assertEquals("stream-2", status.playbackId());
+        assertEquals(ClientPlaybackState.BUFFERING, status.state());
+        assertTrue(controller.isPlaybackSessionActive());
+
+        // Once the stream starts, the real backend state takes over again.
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", "stream-2", 0, new byte[] {1}, 1)));
+        assertEquals(ClientPlaybackState.PLAYING, status(controller).state());
+    }
+
+    @Test
+    void serverStreamErrorBeforeFirstChunkIsReportedToServer() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+
+        controller.handleAudioPayload(codec.encode(serverStreamPacket()));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.error("global", "stream-1", 0, "HTTP 404 for audio URL")));
+
+        ClientStatusPacket status = status(controller);
+        assertEquals("stream-1", status.playbackId());
+        assertEquals(ClientPlaybackState.ERROR, status.state());
+    }
+
+    @Test
+    void serverStreamEndBeforeFirstChunkIsReportedAsStopped() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+
+        controller.handleAudioPayload(codec.encode(serverStreamPacket()));
+        controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.end("global", "stream-1", 0)));
+
+        ClientStatusPacket status = status(controller);
+        assertEquals("stream-1", status.playbackId());
+        assertEquals(ClientPlaybackState.STOPPED, status.state());
     }
 
     @Test

@@ -168,7 +168,7 @@ class EvilKaraokeCommandTest {
 
         List<Component> messages = EvilKaraokeCommand.searchMessages("hello world", 2, results, "ek");
 
-        assertEquals(Component.text("Results for \"hello world\" (page 2):", NamedTextColor.GOLD), messages.getFirst());
+        assertEquals(expectedSearchHeader("hello world", 2), messages.getFirst());
         assertEquals(7, messages.size());
         assertEquals(Component.empty()
                 .append(Component.text("⬆️ ", NamedTextColor.AQUA)
@@ -198,7 +198,7 @@ class EvilKaraokeCommandTest {
 
         List<Component> messages = EvilKaraokeCommand.searchMessages("never", 3, results, "ek", false);
 
-        assertEquals(Component.text("Results for \"never\" (page 3):", NamedTextColor.GOLD), messages.getFirst());
+        assertEquals(expectedSearchHeader("never", 3), messages.getFirst());
         assertEquals(7, messages.size());
         assertEquals(Component.empty().append(Component.text("⬆️ ", NamedTextColor.AQUA)
                 .hoverEvent(HoverEvent.showText(Component.text("Previous page (2)")))
@@ -286,6 +286,38 @@ class EvilKaraokeCommandTest {
         assertEquals(expectedCollectionLine(1, "Empty Playlist", 0, "")
                 .append(Component.text("[Empty]", NamedTextColor.DARK_GRAY)
                         .hoverEvent(HoverEvent.showText(Component.text("This playlist has no songs")))), messages.get(1));
+    }
+
+    @Test
+    void randomSongMessagesOfferQueueAllAndPagedQueueOneActions() {
+        List<KaraokeTrack> tracks = java.util.stream.IntStream.rangeClosed(1, 6)
+                .mapToObj(i -> i == 6
+                        ? coveredTrack("random-6", "Sixth Random", "Artist Six", "Neuro")
+                        : track("random-" + i, "Random " + i))
+                .toList();
+
+        List<Component> messages = EvilKaraokeCommand.randomSongMessages(tracks, 2, "ek");
+
+        assertEquals(Component.text("Random songs (page 2/2): ", NamedTextColor.GOLD)
+                .append(Component.text("[Queue All]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Queue all random songs")))
+                        .clickEvent(ClickEvent.runCommand("/ek randomsong queue all"))), messages.getFirst());
+        assertEquals(Component.text("6. ", NamedTextColor.GOLD)
+                .append(expectedCoveredSongLine("Sixth Random", "Artist Six", "Neuro"))
+                .append(Component.text(" ", NamedTextColor.GRAY))
+                .append(Component.text("[Queue]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Queue Sixth Random")))
+                        .clickEvent(ClickEvent.runCommand("/ek randomsong queue 6"))), messages.get(1));
+        assertEquals(Component.empty().append(Component.text("⬆️ ", NamedTextColor.AQUA)
+                .hoverEvent(HoverEvent.showText(Component.text("Previous page (1)")))
+                .clickEvent(ClickEvent.runCommand("/ek randomsong 1"))), messages.getLast());
+    }
+
+    private static Component expectedSearchHeader(String query, int page) {
+        return Component.text("Results for \"" + query + "\" (page " + page + "): ", NamedTextColor.GOLD)
+                .append(Component.text("[Queue All]", NamedTextColor.GREEN)
+                        .hoverEvent(HoverEvent.showText(Component.text("Queue all results on this page")))
+                        .clickEvent(ClickEvent.runCommand("/ek search queue-all")));
     }
 
     private static Component expectedSongLine(String title, String artist) {

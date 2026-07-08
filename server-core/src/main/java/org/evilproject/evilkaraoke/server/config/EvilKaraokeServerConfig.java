@@ -42,8 +42,28 @@ public record EvilKaraokeServerConfig(NeurokaraokeEndpoints api, EvilKaraokeConf
 
     public void save(Path file) throws IOException {
         Files.createDirectories(file.getParent());
+        JsonObject root = new JsonObject();
+        root.add("api", GSON.toJsonTree(api).getAsJsonObject());
+        JsonObject playbackObject = new JsonObject();
+        playbackObject.addProperty("defaultTargets", playback.defaultTargets());
+        playbackObject.addProperty("defaultSource", playback.defaultSource());
+        playbackObject.addProperty("defaultVolume", playback.defaultVolume());
+        playbackObject.addProperty("defaultPitch", playback.defaultPitch());
+        playbackObject.addProperty("defaultMinVolume", playback.defaultMinVolume());
+        playbackObject.addProperty("randomCacheSize", playback.randomCacheSize());
+        playbackObject.addProperty("pauseBetweenSongsSeconds", playback.pauseBetweenSongsSeconds());
+        playbackObject.addProperty("requireClientMod", playback.requireClientMod());
+        playbackObject.addProperty("allowRadio", playback.allowRadio());
+        root.add("playback", playbackObject);
+        JsonObject stats = new JsonObject();
+        stats.addProperty("enabled", playback.statsEnabled());
+        stats.addProperty("saveIntervalSeconds", playback.statsSaveIntervalSeconds());
+        root.add("stats", stats);
+        JsonObject debug = new JsonObject();
+        debug.addProperty("logPackets", playback.debugPackets());
+        root.add("debug", debug);
         try (Writer writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
-            GSON.toJson(this, writer);
+            GSON.toJson(root, writer);
         }
     }
 
@@ -79,9 +99,9 @@ public record EvilKaraokeServerConfig(NeurokaraokeEndpoints api, EvilKaraokeConf
                 longValue(playback, "pauseBetweenSongsSeconds", defaults.pauseBetweenSongsSeconds()),
                 booleanValue(playback, "requireClientMod", defaults.requireClientMod()),
                 booleanValue(playback, "allowRadio", defaults.allowRadio()),
-                booleanValue(stats, "enabled", defaults.statsEnabled()),
-                intValue(stats, "saveIntervalSeconds", defaults.statsSaveIntervalSeconds()),
-                booleanValue(debug, "logPackets", defaults.debugPackets()));
+                booleanValue(stats, "enabled", booleanValue(playback, "statsEnabled", defaults.statsEnabled())),
+                intValue(stats, "saveIntervalSeconds", intValue(playback, "statsSaveIntervalSeconds", defaults.statsSaveIntervalSeconds())),
+                booleanValue(debug, "logPackets", booleanValue(playback, "debugPackets", defaults.debugPackets())));
     }
 
     private static String stringValue(JsonObject object, String key, String fallback) {

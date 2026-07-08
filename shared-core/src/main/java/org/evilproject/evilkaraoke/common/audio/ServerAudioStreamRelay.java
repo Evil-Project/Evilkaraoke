@@ -8,13 +8,20 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.sound.sampled.AudioInputStream;
 
 import org.evilproject.evilkaraoke.common.model.AudioAsset;
 import org.evilproject.evilkaraoke.common.model.AudioFormat;
@@ -26,13 +33,25 @@ import org.evilproject.evilkaraoke.common.security.AudioUrlValidator;
 
 public final class ServerAudioStreamRelay implements AudioStreamRelay {
     public static final int CHUNK_BYTES = 16 * 1024;
+    private static final int MAX_BUFFERED_ASSET_BYTES = 128 * 1024 * 1024;
     private static final int MAX_REDIRECTS = 5;
     private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration STREAM_PREBUFFER = Duration.ofSeconds(8);
     private static final long MIN_PREBUFFER_BYTES = 256L * 1024L;
-    private static final long UNKNOWN_DURATION_BYTES_PER_SECOND = 512L * 1024L;
     private static final long MAX_PACE_SLEEP_MILLIS = 250L;
+    private static final Duration READ_STALL_TIMEOUT = Duration.ofSeconds(30);
     private static final Pattern CONTENT_RANGE = Pattern.compile("bytes (\\d+)-(\\d+)/(\\d+|\\*)");
+
+    // Relays block a thread for the whole track (paced sends) and each finite
+    // asset adds a download task, so they must not run on the ForkJoinPool
+    // common pool: on 1-2 core hosts its parallelism is 1 and a second relay
+    // (e.g. a rejoin sync) would queue behind the active song forever.
+    private static final AtomicInteger RELAY_THREAD_ID = new AtomicInteger();
+    private static final ExecutorService RELAY_EXECUTOR = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "evilkaraoke-relay-" + RELAY_THREAD_ID.incrementAndGet());
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -64,7 +83,7 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
         Objects.requireNonNull(track, "track");
         Objects.requireNonNull(broadcaster, "broadcaster");
         Objects.requireNonNull(shouldContinue, "shouldContinue");
-        return CompletableFuture.runAsync(() -> relayBlocking(sessionId, playbackId, track, offset, serverTime, broadcaster, shouldContinue));
+        return CompletableFuture.runAsync(() -> relayBlocking(sessionId, playbackId, track, offset, serverTime, broadcaster, shouldContinue), RELAY_EXECUTOR);
     }
 
     private void relayBlocking(String sessionId,
@@ -138,59 +157,48 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
                 throw new IllegalStateException("HTTP " + response.statusCode() + " for audio URL");
             }
             try (InputStream body = stripIcyMetadata(response.body(), response)) {
-                return relayBody(sessionId, playbackId, sequence, body, RelayPacer.unpaced(), broadcaster, shouldContinue);
+                return relayDecodedBody(sessionId, playbackId, sequence, body, Duration.ZERO, false,
+                        serverTime, broadcaster, shouldContinue);
             }
         }
 
         HttpResponse<InputStream> response = sendGet(asset.url(), null, 0);
-        try (InputStream body = response.body()) {
-            if (response.statusCode() == 200) {
-                RelayPacer pacer = RelayPacer.forFiniteTrack(track, offset, serverTime, contentLength(response));
-                return relayBody(sessionId, playbackId, sequence, body, pacer, broadcaster, shouldContinue);
-            }
-            if (response.statusCode() != 206) {
-                throw new IllegalStateException("HTTP " + response.statusCode() + " for audio URL");
-            }
-            ByteRange range = byteRange(response);
-            if (range.start() != 0L) {
-                throw new IllegalStateException("Unexpected initial byte range " + range.start());
-            }
-            RelayPacer pacer = RelayPacer.forFiniteTrack(track, offset, serverTime, range.total());
-            StreamResult result = relayBody(sessionId, playbackId, sequence, body, pacer, broadcaster, shouldContinue);
-            if (!range.hasKnownTotal() || range.isComplete()) {
-                return result;
-            }
-            long nextStart = range.endInclusive() + 1;
-            int nextSequence = result.nextSequence();
-            boolean bytesSent = result.bytesSent();
-            while (nextStart < range.total()) {
-                ensureContinuing(shouldContinue);
-                HttpResponse<InputStream> nextResponse = sendGet(asset.url(), "bytes=" + nextStart + "-", 0);
-                try (InputStream nextBody = nextResponse.body()) {
-                    if (nextResponse.statusCode() != 206) {
-                        throw new IllegalStateException("HTTP " + nextResponse.statusCode() + " while requesting audio bytes from " + nextStart);
-                    }
-                    ByteRange nextRange = byteRange(nextResponse);
-                    if (nextRange.start() != nextStart || !nextRange.hasKnownTotal() || nextRange.total() != range.total()) {
-                        throw new IllegalStateException("Inconsistent Content-Range for audio URL");
-                    }
-                    StreamResult nextResult = relayBody(sessionId, playbackId, nextSequence, nextBody, pacer, broadcaster, shouldContinue);
-                    nextSequence = nextResult.nextSequence();
-                    bytesSent = bytesSent || nextResult.bytesSent();
-                    nextStart = nextRange.endInclusive() + 1;
-                }
-            }
-            return new StreamResult(nextSequence, bytesSent);
+        try (InputStream source = openFiniteAssetStream(asset.url(), response, shouldContinue)) {
+            return relayDecodedBody(sessionId, playbackId, sequence, source, offset, true, serverTime, broadcaster, shouldContinue);
         }
     }
 
-    private StreamResult relayBody(String sessionId,
-                                   String playbackId,
-                                   int sequence,
-                                   InputStream body,
-                                   RelayPacer pacer,
-                                   Consumer<ProtocolPacket> broadcaster,
-                                   BooleanSupplier shouldContinue) throws Exception {
+    private StreamResult relayDecodedBody(String sessionId,
+                                          String playbackId,
+                                          int sequence,
+                                          InputStream body,
+                                          Duration offset,
+                                          boolean seekable,
+                                          Instant serverTime,
+                                          Consumer<ProtocolPacket> broadcaster,
+                                          BooleanSupplier shouldContinue) throws Exception {
+        try (AudioInputStream pcm = JavaSoundPcmDecoder.openPcmStream(body)) {
+            javax.sound.sampled.AudioFormat format = pcm.getFormat();
+            if (seekable) {
+                seekPcm(pcm, format, offset, shouldContinue);
+            }
+            // Since decoding moved server-side we pace the decoded PCM by its own
+            // byte-rate (known from the format), not the encoded size. Finite tracks
+            // are paced so the client buffers only a small prebuffer; endless live
+            // streams stay unpaced and are throttled by the upstream network instead.
+            RelayPacer pacer = seekable ? RelayPacer.forPcm(format, offset, serverTime) : RelayPacer.unpaced();
+            return relayPcmBody(sessionId, playbackId, sequence, pcm, format, pacer, broadcaster, shouldContinue);
+        }
+    }
+
+    private StreamResult relayPcmBody(String sessionId,
+                                      String playbackId,
+                                      int sequence,
+                                      InputStream body,
+                                      javax.sound.sampled.AudioFormat format,
+                                      RelayPacer pacer,
+                                      Consumer<ProtocolPacket> broadcaster,
+                                      BooleanSupplier shouldContinue) throws Exception {
         byte[] buffer = new byte[CHUNK_BYTES];
         boolean bytesSent = false;
         int nextSequence = sequence;
@@ -200,11 +208,121 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
             if (read == 0) {
                 continue;
             }
-            broadcaster.accept(AudioStreamChunkPacket.chunk(sessionId, playbackId, nextSequence++, buffer, read));
+            broadcaster.accept(AudioStreamChunkPacket.chunk(sessionId, playbackId, nextSequence++, buffer, read,
+                    format.getSampleRate(), format.getChannels(), format.getSampleSizeInBits()));
             pacer.afterBytesSent(read, shouldContinue);
             bytesSent = true;
         }
         return new StreamResult(nextSequence, bytesSent);
+    }
+
+    /**
+     * Opens a stream over a finite asset that decodes while the download is still
+     * in flight. The initial response status and range are validated synchronously
+     * so an early failure (bad status, bad range) still happens before any bytes
+     * reach clients and the track's fallback asset can be tried. The body — plus
+     * any follow-up Range requests the CDN forces by answering a plain GET with a
+     * truncated 206 — then downloads at full network speed on a background task
+     * while the paced relay consumes the bytes as they arrive.
+     */
+    private InputStream openFiniteAssetStream(String url, HttpResponse<InputStream> response, BooleanSupplier shouldContinue) throws Exception {
+        ByteRange initialRange;
+        try {
+            if (response.statusCode() == 200) {
+                initialRange = null;
+            } else if (response.statusCode() == 206) {
+                initialRange = byteRange(response);
+                if (initialRange.start() != 0L) {
+                    throw new IllegalStateException("Unexpected initial byte range " + initialRange.start());
+                }
+            } else {
+                throw new IllegalStateException("HTTP " + response.statusCode() + " for audio URL");
+            }
+        } catch (Exception ex) {
+            response.body().close();
+            throw ex;
+        }
+        AsyncTransferBuffer buffer = new AsyncTransferBuffer();
+        ByteRange firstRange = initialRange;
+        RELAY_EXECUTOR.execute(() -> downloadFiniteAsset(url, response, firstRange, buffer, shouldContinue));
+        return buffer;
+    }
+
+    private void downloadFiniteAsset(String url,
+                                     HttpResponse<InputStream> response,
+                                     ByteRange initialRange,
+                                     AsyncTransferBuffer buffer,
+                                     BooleanSupplier shouldContinue) {
+        try {
+            long transferred;
+            try (InputStream body = response.body()) {
+                transferred = transferAll(body, buffer, shouldContinue);
+            }
+            if (initialRange != null) {
+                validateChunkLength(transferred, initialRange);
+                long total = initialRange.total();
+                long nextStart = initialRange.endInclusive() + 1;
+                while (initialRange.hasKnownTotal() && nextStart < total) {
+                    ensureContinuing(shouldContinue);
+                    HttpResponse<InputStream> nextResponse = sendGet(url, "bytes=" + nextStart + "-", 0);
+                    ByteRange nextRange;
+                    try (InputStream nextBody = nextResponse.body()) {
+                        if (nextResponse.statusCode() != 206) {
+                            throw new IllegalStateException("HTTP " + nextResponse.statusCode() + " while requesting audio bytes from " + nextStart);
+                        }
+                        nextRange = byteRange(nextResponse);
+                        if (nextRange.start() != nextStart || !nextRange.hasKnownTotal() || nextRange.total() != total) {
+                            throw new IllegalStateException("Inconsistent Content-Range for audio URL");
+                        }
+                        transferred = transferAll(nextBody, buffer, shouldContinue);
+                    }
+                    validateChunkLength(transferred, nextRange);
+                    nextStart = nextRange.endInclusive() + 1;
+                }
+            }
+            buffer.finish();
+        } catch (Exception ex) {
+            buffer.fail(ex);
+        }
+    }
+
+    private static long transferAll(InputStream body, AsyncTransferBuffer buffer, BooleanSupplier shouldContinue) throws Exception {
+        byte[] chunk = new byte[64 * 1024];
+        long transferred = 0L;
+        int read;
+        while ((read = body.read(chunk)) != -1) {
+            ensureContinuing(shouldContinue);
+            buffer.append(chunk, read);
+            transferred += read;
+        }
+        return transferred;
+    }
+
+    private static void seekPcm(AudioInputStream pcm, javax.sound.sampled.AudioFormat format, Duration offset, BooleanSupplier shouldContinue) {
+        long offsetSeconds = offset == null ? 0L : offset.getSeconds();
+        if (offsetSeconds <= 0L) {
+            return;
+        }
+        long frameSize = format.getFrameSize();
+        float frameRate = format.getFrameRate();
+        if (frameSize <= 0 || frameRate <= 0 || Float.isInfinite(frameRate)) {
+            return;
+        }
+        long bytesToSkip = (long) (frameRate * offsetSeconds) * frameSize;
+        byte[] discard = new byte[8_192];
+        try {
+            long remaining = bytesToSkip;
+            while (remaining > 0L) {
+                ensureContinuing(shouldContinue);
+                int read = pcm.read(discard, 0, (int) Math.min(discard.length, remaining));
+                if (read == -1) {
+                    return;
+                }
+                remaining -= read;
+            }
+        } catch (Exception ignored) {
+            // If seek fails, stream from the current position.
+        }
     }
 
     private HttpResponse<InputStream> sendGet(String url, String range, int redirects) throws Exception {
@@ -273,8 +391,12 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
         return new ByteRange(start, endInclusive, total);
     }
 
-    private static long contentLength(HttpResponse<?> response) {
-        return response.headers().firstValueAsLong("Content-Length").orElse(-1L);
+    private static void validateChunkLength(long actualLength, ByteRange range) {
+        long expectedLength = range.endInclusive() - range.start() + 1L;
+        if (actualLength != expectedLength) {
+            throw new IllegalStateException("Expected " + expectedLength + " bytes for range "
+                    + range.start() + "-" + range.endInclusive() + " but got " + actualLength);
+        }
     }
 
     private static void ensureContinuing(BooleanSupplier shouldContinue) {
@@ -321,6 +443,111 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
     private static final class PlaybackCancelledException extends RuntimeException {
     }
 
+    /**
+     * Hands bytes from the background download task to the decoding relay. Bytes
+     * are buffered in memory (bounded by {@link #MAX_BUFFERED_ASSET_BYTES}, the
+     * same cap as the fully-buffered download this replaces) so the origin
+     * download runs at full network speed while the paced relay reads at PCM
+     * rate. A read that sees no data for {@link #READ_STALL_TIMEOUT} fails the
+     * stream so a stalled origin surfaces as an error packet instead of leaving
+     * clients buffering forever.
+     */
+    private static final class AsyncTransferBuffer extends InputStream {
+        private final ArrayDeque<byte[]> chunks = new ArrayDeque<>();
+        private int chunkOffset;
+        private long totalBuffered;
+        private boolean finished;
+        private boolean closed;
+        private java.io.IOException failure;
+
+        synchronized void append(byte[] data, int length) throws java.io.IOException {
+            if (closed) {
+                throw new java.io.IOException("Relay consumer closed the stream");
+            }
+            if (length <= 0) {
+                return;
+            }
+            if (totalBuffered + length > MAX_BUFFERED_ASSET_BYTES) {
+                java.io.IOException tooLarge = new java.io.IOException("Audio asset is too large to buffer safely");
+                failure = tooLarge;
+                finished = true;
+                notifyAll();
+                throw tooLarge;
+            }
+            chunks.add(Arrays.copyOfRange(data, 0, length));
+            totalBuffered += length;
+            notifyAll();
+        }
+
+        synchronized void finish() {
+            finished = true;
+            notifyAll();
+        }
+
+        synchronized void fail(Throwable error) {
+            if (failure == null) {
+                failure = error instanceof java.io.IOException io ? io : new java.io.IOException(safeError(error), error);
+            }
+            finished = true;
+            notifyAll();
+        }
+
+        @Override
+        public int read() throws java.io.IOException {
+            byte[] single = new byte[1];
+            int read = read(single, 0, 1);
+            return read == -1 ? -1 : single[0] & 0xFF;
+        }
+
+        @Override
+        public synchronized int read(byte[] buffer, int offset, int length) throws java.io.IOException {
+            Objects.checkFromIndexSize(offset, length, buffer.length);
+            if (length == 0) {
+                return 0;
+            }
+            long deadlineNanos = System.nanoTime() + READ_STALL_TIMEOUT.toNanos();
+            while (chunks.isEmpty() && !finished && !closed) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0L) {
+                    fail(new java.io.IOException("Timed out waiting for audio data from the origin"));
+                    break;
+                }
+                try {
+                    wait(Math.max(1L, remainingNanos / 1_000_000L));
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.IOException("Interrupted while waiting for audio data", ex);
+                }
+            }
+            if (closed) {
+                throw new java.io.IOException("Stream closed");
+            }
+            byte[] chunk = chunks.peek();
+            if (chunk == null) {
+                if (failure != null) {
+                    throw failure;
+                }
+                return -1;
+            }
+            int copied = Math.min(length, chunk.length - chunkOffset);
+            System.arraycopy(chunk, chunkOffset, buffer, offset, copied);
+            chunkOffset += copied;
+            if (chunkOffset >= chunk.length) {
+                chunks.remove();
+                chunkOffset = 0;
+            }
+            return copied;
+        }
+
+        @Override
+        public synchronized void close() {
+            closed = true;
+            chunks.clear();
+            chunkOffset = 0;
+            notifyAll();
+        }
+    }
+
     private static final class RelayPacer {
         private final long bytesPerSecond;
         private final long scheduledStartNanos;
@@ -339,8 +566,8 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
             return new RelayPacer(0L, Instant.EPOCH, Duration.ZERO);
         }
 
-        private static RelayPacer forFiniteTrack(KaraokeTrack track, Duration offset, Instant serverTime, long totalBytes) {
-            long bytesPerSecond = bytesPerSecond(track, totalBytes);
+        private static RelayPacer forPcm(javax.sound.sampled.AudioFormat format, Duration offset, Instant serverTime) {
+            long bytesPerSecond = pcmBytesPerSecond(format);
             return bytesPerSecond <= 0L ? unpaced() : new RelayPacer(bytesPerSecond, serverTime, offset);
         }
 
@@ -366,12 +593,13 @@ public final class ServerAudioStreamRelay implements AudioStreamRelay {
             return prebufferBytes + multiplyRate(bytesPerSecond, playbackNanos);
         }
 
-        private static long bytesPerSecond(KaraokeTrack track, long totalBytes) {
-            if (track.duration() != null && !track.duration().isZero() && !track.duration().isNegative() && totalBytes > 0L) {
-                long durationMillis = Math.max(1L, track.duration().toMillis());
-                return Math.max(1L, (totalBytes * 1000L + durationMillis - 1L) / durationMillis);
+        private static long pcmBytesPerSecond(javax.sound.sampled.AudioFormat format) {
+            float frameRate = format.getFrameRate();
+            int frameSize = format.getFrameSize();
+            if (frameSize <= 0 || frameRate <= 0.0f || Float.isNaN(frameRate) || Float.isInfinite(frameRate)) {
+                return 0L;
             }
-            return UNKNOWN_DURATION_BYTES_PER_SECOND;
+            return Math.max(1L, (long) Math.ceil((double) frameRate * frameSize));
         }
 
         private static long scheduledStartNanos(Instant serverTime) {

@@ -46,7 +46,7 @@ public final class EvilKaraokeCommandService {
             case "doctor" -> doctor(actor);
             case "listeners" -> listeners(actor);
             case "reload" -> reload(actor);
-            case "randomsong" -> randomSong(actor);
+            case "randomsong" -> randomSong(actor, args, label);
             case "request" -> request(actor, args);
             case "search" -> search(actor, args, label);
             case "radio" -> radio(actor, args);
@@ -71,6 +71,12 @@ public final class EvilKaraokeCommandService {
         }
         if (args.length == 2 && "request".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("id", "url"), args[1]);
+        }
+        if (args.length == 2 && "randomsong".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("queue", "1"), args[1]);
+        }
+        if (args.length == 3 && "randomsong".equalsIgnoreCase(args[0]) && "queue".equalsIgnoreCase(args[1])) {
+            return filterPrefix(randomSongQueueArguments(CHAT_PAGE_SIZE), args[2]);
         }
         if (args.length == 2 && "queue".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("move", "cancel", "random", "loop", "previous", "next", "pause", "resume", "stop", "1"), args[1]);
@@ -130,6 +136,9 @@ public final class EvilKaraokeCommandService {
         }
         if (args.length == 3 && "queue".equalsIgnoreCase(args[0]) && "loop".equalsIgnoreCase(args[1])) {
             return filterPrefix(queuePositionSuggestions(actor), args[2]);
+        }
+        if (args.length == 3 && "randomsong".equalsIgnoreCase(args[0]) && "queue".equalsIgnoreCase(args[1])) {
+            return filterPrefix(randomSongSelectionSuggestions(actor), args[2]);
         }
         return suggest(args);
     }
@@ -257,6 +266,14 @@ public final class EvilKaraokeCommandService {
         return size == 0 ? List.of() : numberRange(1, size);
     }
 
+    private List<String> randomSongSelectionSuggestions(CommandActor actor) {
+        if (!actor.isPlayer() || !actor.hasPermission("evilkaraoke.command.randomsong")) {
+            return List.of();
+        }
+        int size = core.randomSongSelection(actor.playerId()).map(List::size).orElse(CHAT_PAGE_SIZE);
+        return randomSongQueueArguments(size);
+    }
+
     private static String canonicalSubcommand(String value) {
         return value.toLowerCase(Locale.ROOT);
     }
@@ -299,9 +316,11 @@ public final class EvilKaraokeCommandService {
         actor.sendMessage("/" + label + " request id <songId> - request by song id");
         actor.sendMessage("/" + label + " request url <https://...> [title] - request a direct audio URL");
         actor.sendMessage("/" + label + " search <query> - search Neurokaraoke");
+        actor.sendMessage("/" + label + " search queue-all - queue the latest shown search page");
         actor.sendMessage("/" + label + " setlist [page] - list Neurokaraoke setlists");
         actor.sendMessage("/" + label + " playlist [page] - list public Neurokaraoke playlists");
-        actor.sendMessage("/" + label + " randomsong - queue a random song");
+        actor.sendMessage("/" + label + " randomsong [page] - show random songs to queue");
+        actor.sendMessage("/" + label + " randomsong queue <all|row> - queue all latest random songs or one row");
         actor.sendMessage("/" + label + " queue|current - inspect playback");
         actor.sendMessage("/" + label + " queue cancel <position|all> - remove queued song(s)");
         actor.sendMessage("/" + label + " queue move <from> <to> - reorder your queued songs");
@@ -348,20 +367,118 @@ public final class EvilKaraokeCommandService {
         return 1;
     }
 
-    private int randomSong(CommandActor actor) {
+    private int randomSong(CommandActor actor, String[] args, String label) {
         if (!actor.hasPermission("evilkaraoke.command.randomsong")) {
             return deny(actor);
+        }
+        int page = 1;
+        if (args.length >= 2) {
+            if ("queue".equalsIgnoreCase(args[1])) {
+                return queueRandomSongSelection(actor, args);
+            }
+            page = parseRawInt(args[1], -1);
+            if (page < 1) {
+                actor.sendMessage("Usage: /ek randomsong [page] | /ek randomsong queue <all|row>");
+                return 1;
+            }
         }
         if (!requirePlayer(actor) || !canRequest(actor)) {
             return 1;
         }
+        int requestedPage = page;
+        if (args.length >= 2) {
+            List<KaraokeTrack> cached = core.randomSongSelection(actor.playerId()).orElse(List.of());
+            if (!cached.isEmpty()) {
+                randomSongMessages(cached, requestedPage, label).forEach(actor::sendMessage);
+                return 1;
+            }
+        }
+        async(core.neurokaraokeClient().randomSongs().thenApply(this::randomPlaylist),
+                tracks -> {
+                    core.rememberRandomSongSelection(actor.playerId(), tracks);
+                    randomSongMessages(tracks, requestedPage, label).forEach(actor::sendMessage);
+                },
+                error -> actor.sendMessage(error("Could not fetch random songs", error)));
+        return 1;
+    }
+
+    private int queueRandomSongSelection(CommandActor actor, String[] args) {
+        if (!requirePlayer(actor) || !canRequest(actor)) {
+            return 1;
+        }
+        if (args.length < 3) {
+            actor.sendMessage("Usage: /ek randomsong queue <all|row>");
+            return 1;
+        }
+        List<KaraokeTrack> tracks = core.randomSongSelection(actor.playerId()).orElse(List.of());
+        if (tracks.isEmpty()) {
+            actor.sendMessage("No random song playlist is ready. Use /ek randomsong first.");
+            return 1;
+        }
         KaraokePlayer player = player(actor);
         maybeWarnClient(actor);
-        async(core.coordinator().requestRandom(player), track -> {
-            core.statsService().recordRequest(player.id(), player.name(), track.id(), track.title());
-            actor.sendMessage("Queued random song: " + songLine(track));
-        }, error -> actor.sendMessage(error("Could not fetch a random song", error)));
+        if ("all".equalsIgnoreCase(args[2])) {
+            async(core.coordinator().requestAll(tracks, player),
+                    count -> {
+                        for (KaraokeTrack track : tracks) {
+                            core.statsService().recordRequest(player.id(), player.name(), track.id(), track.title());
+                        }
+                        actor.sendMessage("Queued " + count + " random song(s).");
+                    },
+                    error -> actor.sendMessage(error("Could not queue random songs", error)));
+            return 1;
+        }
+        int row = parseRawInt(args[2], -1);
+        if (row < 1 || row > tracks.size()) {
+            actor.sendMessage("Random song row must be between 1 and " + tracks.size() + ".");
+            return 1;
+        }
+        KaraokeTrack track = tracks.get(row - 1);
+        async(core.coordinator().request(track, player).thenApply(ignored -> track),
+                queued -> {
+                    core.statsService().recordRequest(player.id(), player.name(), queued.id(), queued.title());
+                    actor.sendMessage("Queued random song: " + songLine(queued));
+                },
+                error -> actor.sendMessage(error("Could not queue that random song", error)));
         return 1;
+    }
+
+    private List<KaraokeTrack> randomPlaylist(List<KaraokeTrack> tracks) {
+        if (tracks.isEmpty()) {
+            throw new IllegalStateException("No random Neurokaraoke songs returned");
+        }
+        return List.copyOf(tracks);
+    }
+
+    private static List<CommandMessage> randomSongMessages(List<KaraokeTrack> tracks, int requestedPage, String label) {
+        List<CommandMessage> messages = new ArrayList<>();
+        int totalPages = Math.max(1, (int) Math.ceil(tracks.size() / (double) CHAT_PAGE_SIZE));
+        int page = Math.min(Math.max(1, requestedPage), totalPages);
+        messages.add(CommandMessage.builder()
+                .append("Random songs (page " + page + "/" + totalPages + "): ")
+                .action("[Queue All]", "/" + label + " randomsong queue all", "Queue all random songs")
+                .build());
+        int start = (page - 1) * CHAT_PAGE_SIZE;
+        for (int i = start; i < Math.min(tracks.size(), start + CHAT_PAGE_SIZE); i++) {
+            KaraokeTrack track = tracks.get(i);
+            messages.add(CommandMessage.builder()
+                    .append((i + 1) + ". " + songLine(track) + " ")
+                    .action("[Queue]", "/" + label + " randomsong queue " + (i + 1), "Queue " + track.title())
+                    .build());
+        }
+        if (totalPages > 1) {
+            messages.add(pageNavigation("/" + label + " randomsong", page, page > 1, page < totalPages));
+        }
+        return messages;
+    }
+
+    private static List<String> randomSongQueueArguments(int size) {
+        List<String> arguments = new ArrayList<>(List.of("all"));
+        int count = Math.max(1, size);
+        for (int i = 1; i <= count; i++) {
+            arguments.add(Integer.toString(i));
+        }
+        return arguments;
     }
 
     private int request(CommandActor actor, String[] args) {
@@ -432,8 +549,11 @@ public final class EvilKaraokeCommandService {
         if (!actor.hasPermission("evilkaraoke.command.search")) {
             return deny(actor);
         }
+        if (args.length >= 2 && "queue-all".equalsIgnoreCase(args[1])) {
+            return queueSearchSelection(actor);
+        }
         if (args.length < 2) {
-            actor.sendMessage("Usage: /ek search <query> [page]");
+            actor.sendMessage("Usage: /ek search <query> [page] | /ek search queue-all");
             return 1;
         }
         SearchRequest searchRequest = parseSearchRequest(args);
@@ -443,7 +563,10 @@ public final class EvilKaraokeCommandService {
                         actor.sendMessage("No Neurokaraoke results for \"" + searchRequest.query() + "\".");
                         return;
                     }
-                    actor.sendMessage("Results for \"" + searchRequest.query() + "\" (page " + searchRequest.page() + "):");
+                    if (actor.isPlayer()) {
+                        core.rememberSearchResultSelection(actor.playerId(), page.results());
+                    }
+                    actor.sendMessage(searchHeaderMessage(searchRequest.query(), searchRequest.page(), label));
                     for (KaraokeTrack track : page.results()) {
                         actor.sendMessage(searchResultMessage(track, label));
                     }
@@ -452,6 +575,28 @@ public final class EvilKaraokeCommandService {
                     }
                 },
                 error -> actor.sendMessage(error("Search failed", error)));
+        return 1;
+    }
+
+    private int queueSearchSelection(CommandActor actor) {
+        if (!requirePlayer(actor) || !canRequest(actor)) {
+            return 1;
+        }
+        List<KaraokeTrack> tracks = core.searchResultSelection(actor.playerId()).orElse(List.of());
+        if (tracks.isEmpty()) {
+            actor.sendMessage("No search results are ready. Use /ek search <query> first.");
+            return 1;
+        }
+        KaraokePlayer player = player(actor);
+        maybeWarnClient(actor);
+        async(core.coordinator().requestAll(tracks, player),
+                count -> {
+                    for (KaraokeTrack track : tracks) {
+                        core.statsService().recordRequest(player.id(), player.name(), track.id(), track.title());
+                    }
+                    actor.sendMessage("Queued " + count + " search result song(s).");
+                },
+                error -> actor.sendMessage(error("Could not queue search results", error)));
         return 1;
     }
 
@@ -567,7 +712,7 @@ public final class EvilKaraokeCommandService {
         if (refresh) {
             return refreshQueue(actor, label, page);
         }
-        actor.sendMessage("Random queue playback " + (enabled ? "enabled." : "disabled."));
+        actor.sendMessage(enabled ? "Random queue order shuffled." : "Random queue playback disabled.");
         return 1;
     }
 
@@ -726,7 +871,7 @@ public final class EvilKaraokeCommandService {
     }
 
     private int control(CommandActor actor, String action, boolean refresh, String label, int page) {
-        if (!actor.hasPermission("evilkaraoke.command.queue." + action)) {
+        if (!canUsePlaybackControl(actor, action)) {
             return deny(actor);
         }
         switch (action) {
@@ -1114,6 +1259,13 @@ public final class EvilKaraokeCommandService {
         return String.join(" ", Arrays.copyOfRange(args, startInclusive, args.length));
     }
 
+    private static CommandMessage searchHeaderMessage(String query, int page, String label) {
+        return CommandMessage.builder()
+                .append("Results for \"" + query + "\" (page " + page + "): ")
+                .action("[Queue All]", "/" + label + " search queue-all", "Queue all results on this page")
+                .build();
+    }
+
     private static CommandMessage searchResultMessage(KaraokeTrack track, String label) {
         CommandMessage.Builder message = CommandMessage.builder()
                 .append("- " + songLine(track) + " ");
@@ -1180,7 +1332,7 @@ public final class EvilKaraokeCommandService {
     }
 
     private static boolean canUsePlaybackControl(CommandActor actor, String action) {
-        return actor.hasPermission("evilkaraoke.command.queue." + action);
+        return isPublicSwitchControl(action) || actor.hasPermission("evilkaraoke.command.queue." + action);
     }
 
     private static boolean isQueuePlaybackControl(String value) {
@@ -1189,6 +1341,10 @@ public final class EvilKaraokeCommandService {
                 || "previous".equalsIgnoreCase(value)
                 || "next".equalsIgnoreCase(value)
                 || "stop".equalsIgnoreCase(value);
+    }
+
+    private static boolean isPublicSwitchControl(String action) {
+        return "previous".equalsIgnoreCase(action) || "next".equalsIgnoreCase(action);
     }
 
     private CommandMessage queueItemMessage(CommandActor actor,

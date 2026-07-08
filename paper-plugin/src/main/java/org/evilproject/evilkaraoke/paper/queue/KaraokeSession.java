@@ -4,12 +4,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 
 import org.bukkit.entity.Player;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
@@ -278,6 +278,10 @@ public final class KaraokeSession {
 
     public synchronized boolean toggleRandom() {
         randomEnabled = !randomEnabled;
+        if (randomEnabled) {
+            shuffleQueue(requests);
+            shuffleQueue(randomTracks);
+        }
         return randomEnabled;
     }
 
@@ -313,20 +317,26 @@ public final class KaraokeSession {
     }
 
     private QueuedTrack pollNext() {
-        QueuedTrack next = pollNext(requests);
+        QueuedTrack next = requests.poll();
         return next == null ? pollNext(randomTracks) : next;
     }
 
     private QueuedTrack pollNext(Deque<QueuedTrack> queue) {
-        if (!randomEnabled || queue.size() <= 1) {
-            return queue.poll();
+        return queue.poll();
+    }
+
+    private static void shuffleQueue(Deque<QueuedTrack> queue) {
+        if (queue.size() <= 1) {
+            return;
         }
-        int index = ThreadLocalRandom.current().nextInt(queue.size());
+        List<QueuedTrack> original = new ArrayList<>(queue);
         List<QueuedTrack> shuffled = new ArrayList<>(queue);
-        QueuedTrack next = shuffled.remove(index);
+        Collections.shuffle(shuffled);
+        if (shuffled.equals(original)) {
+            Collections.rotate(shuffled, 1);
+        }
         queue.clear();
         queue.addAll(shuffled);
-        return next;
     }
 
     private static boolean sameQueuedTrack(QueuedTrack first, QueuedTrack second) {

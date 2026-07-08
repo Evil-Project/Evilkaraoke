@@ -33,10 +33,26 @@ public final class ClientAudioController {
     private final String loader;
     private volatile SoundCategory soundCategory = SoundCategory.MUSIC;
     private volatile String currentPlaybackId = null;
+    private volatile AudioCommandPacket pendingServerStreamCommand = null;
+    /**
+     * Status override between a SERVER_STREAM play command and the backend
+     * actually starting (first chunk), or after the stream fails before any
+     * audio arrived. Without it the periodic status report attaches the
+     * previous track's terminal state to the new playbackId, which the server
+     * reads as "this track already finished" and instantly skips it — draining
+     * the whole queue.
+     */
+    private volatile AudioBackendStatus preStreamStatus = null;
     private volatile PacketAudioInputStream currentServerStream = null;
     private final Object streamSequenceLock = new Object();
     private int expectedServerStreamSequence = 0;
     private long currentServerStreamMissingChunks = 0L;
+    /**
+     * A rejoin-sync stream starts mid-track, so the first chunk of a playback
+     * defines the sequence baseline instead of being compared against 0 —
+     * otherwise a late joiner would instantly fail with "lost N chunks".
+     */
+    private boolean serverStreamSequenceBaselined = false;
     /** Optional hook called on the game thread when a PLAY command is dispatched. */
     private Consumer<KaraokeTrack> onPlayCallback;
 
@@ -69,6 +85,7 @@ public final class ClientAudioController {
         closeCurrentServerStream();
         backend.stop(null);
         currentPlaybackId = null;
+        pendingServerStreamCommand = null;
     }
 
     /** @return the handshake bytes to send on the hello channel when joining a server. */
@@ -94,7 +111,7 @@ public final class ClientAudioController {
 
     /** Builds a status payload the loader can send back on the status channel. */
     public byte[] statusPayload() {
-        AudioBackendStatus status = backend.status();
+        AudioBackendStatus status = effectiveStatus();
         String playbackId = currentPlaybackId != null ? currentPlaybackId : "none";
         PacketAudioInputStream.StreamStats streamStats = streamStats();
         return codec.encode(new ClientStatusPacket(
@@ -111,7 +128,7 @@ public final class ClientAudioController {
     /** @deprecated Use {@link #statusPayload()} instead */
     @Deprecated
     public byte[] statusPayload(String playbackId) {
-        AudioBackendStatus status = backend.status();
+        AudioBackendStatus status = effectiveStatus();
         PacketAudioInputStream.StreamStats streamStats = streamStats();
         return codec.encode(new ClientStatusPacket(
                 playbackId,
@@ -125,7 +142,12 @@ public final class ClientAudioController {
     }
 
     public AudioBackendStatus status() {
-        return backend.status();
+        return effectiveStatus();
+    }
+
+    private AudioBackendStatus effectiveStatus() {
+        AudioBackendStatus preStream = preStreamStatus;
+        return preStream != null ? preStream : backend.status();
     }
 
     /**
@@ -137,7 +159,7 @@ public final class ClientAudioController {
         if (currentPlaybackId == null) {
             return false;
         }
-        ClientPlaybackState state = backend.status().state();
+        ClientPlaybackState state = effectiveStatus().state();
         return switch (state) {
             case BUFFERING, PLAYING, PAUSED -> true;
             case READY, STOPPED, ERROR -> false;
@@ -165,18 +187,17 @@ public final class ClientAudioController {
                 if (command.playbackId().equals(currentPlaybackId) && isPlaybackSessionActive()) {
                     return;
                 }
-                currentPlaybackId = command.playbackId();
                 if (command.deliveryMode() == AudioDeliveryMode.SERVER_STREAM) {
-                    PacketAudioInputStream stream = new PacketAudioInputStream();
                     closeCurrentServerStream();
                     resetStreamSequenceStats();
-                    currentServerStream = stream;
-                    backend.playStream(command, stream);
+                    preStreamStatus = new AudioBackendStatus(ClientPlaybackState.BUFFERING, "Waiting for server audio stream");
+                    pendingServerStreamCommand = command;
                 } else {
                     closeCurrentServerStream();
                     resetStreamSequenceStats();
                     backend.play(command);
                 }
+                currentPlaybackId = command.playbackId();
                 if (onPlayCallback != null && command.track() != null) {
                     onPlayCallback.accept(command.track());
                 }
@@ -195,6 +216,7 @@ public final class ClientAudioController {
                 if (isCurrentPlayback(command)) {
                     closeCurrentServerStream();
                     resetStreamSequenceStats();
+                    pendingServerStreamCommand = null;
                     backend.stop(command);
                     currentPlaybackId = null;
                 }
@@ -215,30 +237,45 @@ public final class ClientAudioController {
         if (!chunk.playbackId().equals(currentPlaybackId)) {
             return;
         }
-        PacketAudioInputStream stream = currentServerStream;
-        if (stream == null) {
-            return;
-        }
         StreamSequenceResult sequence = recordStreamSequence(chunk.sequence());
         if (sequence.duplicate()) {
             return;
         }
+        PacketAudioInputStream stream = !chunk.end() && chunk.error().isBlank() ? ensureServerStreamStarted(chunk) : currentServerStream;
         if (sequence.missingChunks() > 0) {
             String message = "Server audio stream lost " + sequence.missingChunks() + " chunk(s)";
-            stream.fail(message);
+            if (stream != null) {
+                stream.fail(message);
+            }
             logger.warning("Evilkaraoke " + message + " for playback " + chunk.playbackId());
             return;
         }
         if (!chunk.error().isBlank()) {
-            stream.fail(chunk.error());
+            if (stream != null) {
+                stream.fail(chunk.error());
+            } else if (pendingServerStreamCommand != null) {
+                // The stream failed before its first audio chunk; report the
+                // error ourselves so the server can advance past this track.
+                pendingServerStreamCommand = null;
+                preStreamStatus = AudioBackendStatus.error(chunk.error());
+            }
             return;
         }
         byte[] data;
         try {
             data = chunk.decodedData();
         } catch (IllegalArgumentException ex) {
-            stream.fail("Server audio stream sent invalid chunk data");
+            if (stream != null) {
+                stream.fail("Server audio stream sent invalid chunk data");
+            }
             logger.warning("Evilkaraoke server audio stream sent invalid chunk data: " + ex.getMessage());
+            return;
+        }
+        if (stream == null) {
+            if (chunk.end() && pendingServerStreamCommand != null) {
+                pendingServerStreamCommand = null;
+                preStreamStatus = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Server stream ended");
+            }
             return;
         }
         try {
@@ -251,6 +288,23 @@ public final class ClientAudioController {
         if (chunk.end()) {
             stream.finish();
         }
+    }
+
+    private PacketAudioInputStream ensureServerStreamStarted(AudioStreamChunkPacket chunk) {
+        PacketAudioInputStream stream = currentServerStream;
+        if (stream != null) {
+            return stream;
+        }
+        AudioCommandPacket command = pendingServerStreamCommand;
+        if (command == null) {
+            return null;
+        }
+        stream = new PacketAudioInputStream();
+        currentServerStream = stream;
+        pendingServerStreamCommand = null;
+        backend.playPcmStream(command, stream, chunk.sampleRate(), chunk.channels(), chunk.bitsPerSample());
+        preStreamStatus = null;
+        return stream;
     }
 
     private PacketAudioInputStream.StreamStats streamStats() {
@@ -269,6 +323,11 @@ public final class ClientAudioController {
 
     private StreamSequenceResult recordStreamSequence(int sequence) {
         synchronized (streamSequenceLock) {
+            if (!serverStreamSequenceBaselined) {
+                serverStreamSequenceBaselined = true;
+                expectedServerStreamSequence = sequence + 1;
+                return new StreamSequenceResult(false, 0L);
+            }
             if (sequence < expectedServerStreamSequence) {
                 return new StreamSequenceResult(true, 0L);
             }
@@ -286,6 +345,7 @@ public final class ClientAudioController {
         synchronized (streamSequenceLock) {
             expectedServerStreamSequence = 0;
             currentServerStreamMissingChunks = 0L;
+            serverStreamSequenceBaselined = false;
         }
     }
 
@@ -301,6 +361,8 @@ public final class ClientAudioController {
     }
 
     private void closeCurrentServerStream() {
+        pendingServerStreamCommand = null;
+        preStreamStatus = null;
         PacketAudioInputStream stream = currentServerStream;
         currentServerStream = null;
         if (stream != null) {

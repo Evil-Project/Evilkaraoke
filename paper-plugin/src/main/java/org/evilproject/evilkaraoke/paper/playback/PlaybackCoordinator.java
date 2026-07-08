@@ -2,8 +2,10 @@ package org.evilproject.evilkaraoke.paper.playback;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +30,7 @@ import org.evilproject.evilkaraoke.common.model.TargetMode;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
 import org.evilproject.evilkaraoke.common.protocol.AudioDeliveryMode;
+import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
@@ -42,7 +45,16 @@ public final class PlaybackCoordinator {
     private static final long CLIENT_START_TIMEOUT_SECONDS = 10L;
     private static final long CLIENT_STATUS_STALE_SECONDS = 15L;
     private static final long CLIENT_WATCHDOG_POLL_SECONDS = 5L;
-    private static final Duration SERVER_STREAM_START_DELAY = Duration.ofSeconds(5);
+    // Shared start instant for all stream clients. The relay grants an immediate
+    // multi-second PCM prebuffer, so clients only need enough lead time for the
+    // origin's first bytes to arrive; a late stream simply starts on arrival.
+    private static final Duration SERVER_STREAM_START_DELAY = Duration.ofSeconds(2);
+    // Rolling tail of already-sent stream chunks kept for late joiners. Must match
+    // the relay's prebuffer lead: connected clients hold that many seconds of
+    // unplayed audio, so replaying exactly this much tail puts a joiner's first
+    // audible byte at the same position everyone else is hearing right now.
+    private static final Duration STREAM_REJOIN_TAIL = Duration.ofSeconds(8);
+    private static final long MIN_REJOIN_TAIL_BYTES = 256L * 1024L;
 
     private final Plugin plugin;
     private final ClientRegistry clientRegistry;
@@ -61,6 +73,13 @@ public final class PlaybackCoordinator {
     private volatile String currentPlaybackId = null;
     private final Map<UUID, ClientPlaybackReport> clientStates = new HashMap<>();
     private final Set<UUID> playbackClientIds = new HashSet<>();
+    // Players currently attached to the global stream. The relay always runs for
+    // the whole track — even with zero listeners — so decoding never stops when
+    // players leave and joiners can attach to the live stream mid-song.
+    private final Set<UUID> streamListenerIds = new HashSet<>();
+    private final Deque<AudioStreamChunkPacket> recentStreamChunks = new ArrayDeque<>();
+    private long recentStreamChunkBytes = 0L;
+    private KaraokeTrack currentStreamTrack;
     private boolean timerStarted = false;
     private boolean clientDrivenPlayback = false;
 
@@ -90,7 +109,18 @@ public final class PlaybackCoordinator {
     }
 
     public CompletableFuture<KaraokeTrack> requestRandom(Player requester) {
-        return neurokaraokeClient.randomSong().thenCompose(track -> request(track, requester).thenApply(ignored -> track));
+        return requestRandom(requester, 1).thenApply(List::getFirst);
+    }
+
+    public CompletableFuture<List<KaraokeTrack>> requestRandom(Player requester, int count) {
+        int limit = Math.max(1, count);
+        return neurokaraokeClient.randomSongs().thenCompose(tracks -> {
+            List<KaraokeTrack> selected = tracks.stream().limit(limit).toList();
+            if (selected.isEmpty()) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException("No random Neurokaraoke songs returned"));
+            }
+            return requestAll(selected, requester).thenApply(ignored -> selected);
+        });
     }
 
     public CompletableFuture<KaraokeTrack> requestRadio(String station, Player requester) {
@@ -136,6 +166,10 @@ public final class PlaybackCoordinator {
         currentPlaybackId = UUID.randomUUID().toString();
         clientStates.clear();
         playbackClientIds.clear();
+        streamListenerIds.clear();
+        recentStreamChunks.clear();
+        recentStreamChunkBytes = 0L;
+        currentStreamTrack = streamTrack;
         timerStarted = false;
         clientDrivenPlayback = false;
         Instant scheduledStart = Instant.now().plus(SERVER_STREAM_START_DELAY);
@@ -152,6 +186,7 @@ public final class PlaybackCoordinator {
                 AudioDeliveryMode.SERVER_STREAM);
         broadcastTo(streamRecipients, packet);
         playbackClientIds.addAll(streamRecipients.stream().map(Player::getUniqueId).toList());
+        streamListenerIds.addAll(streamRecipients.stream().map(Player::getUniqueId).toList());
         if (!urlRecipients.isEmpty()) {
             AudioCommandPacket urlPacket = new AudioCommandPacket(
                     AudioCommandType.PLAY,
@@ -167,7 +202,7 @@ public final class PlaybackCoordinator {
             broadcastTo(urlRecipients, urlPacket);
             playbackClientIds.addAll(urlRecipients.stream().map(Player::getUniqueId).toList());
         }
-        startAudioRelay(streamTrack, packet, streamRecipients);
+        startAudioRelay(streamTrack, packet);
         schedulePlaybackStartFallback(streamTrack, currentPlaybackId);
     }
 
@@ -176,6 +211,10 @@ public final class PlaybackCoordinator {
         currentPlaybackId = null;
         clientStates.clear();
         playbackClientIds.clear();
+        streamListenerIds.clear();
+        recentStreamChunks.clear();
+        recentStreamChunkBytes = 0L;
+        currentStreamTrack = null;
         timerStarted = false;
         clientDrivenPlayback = false;
     }
@@ -290,27 +329,50 @@ public final class PlaybackCoordinator {
         if (snapshot.current() == null || snapshot.state() != PlaybackState.PLAYING || currentPlaybackId == null) {
             return;
         }
-        Instant scheduledStart = Instant.now().plus(SERVER_STREAM_START_DELAY);
+        if (!clientRegistry.isCompatible(player.getUniqueId())) {
+            return;
+        }
         boolean streamSupported = clientRegistry.supportsServerStream(player.getUniqueId());
-        KaraokeTrack selectedTrack = streamSupported ? selectStreamTrack(snapshot.current().track(), List.of(player)).track() : snapshot.current().track();
+        if (streamSupported) {
+            // Attach to the always-running global relay instead of spawning a new
+            // one: replay the buffered tail (which ends at the live send edge and
+            // starts at the position other clients are hearing right now), then
+            // let live chunks continue seamlessly. serverTime is "now" because the
+            // tail already provides the prebuffer — any scheduled delay would just
+            // put this client behind the global clock.
+            KaraokeTrack streamTrack = currentStreamTrack != null ? currentStreamTrack : snapshot.current().track();
+            AudioCommandPacket packet = new AudioCommandPacket(
+                    AudioCommandType.PLAY,
+                    KaraokeSession.GLOBAL_SESSION_ID,
+                    currentPlaybackId,
+                    streamTrack,
+                    audienceTarget(),
+                    snapshot.offset(),
+                    Instant.now(),
+                    "rejoin-sync",
+                    Duration.ZERO,
+                    AudioDeliveryMode.SERVER_STREAM);
+            playbackClientIds.add(player.getUniqueId());
+            messenger.send(player, packet);
+            for (AudioStreamChunkPacket chunk : recentStreamChunks) {
+                messenger.send(player, chunk);
+            }
+            streamListenerIds.add(player.getUniqueId());
+            return;
+        }
         AudioCommandPacket packet = new AudioCommandPacket(
                 AudioCommandType.PLAY,
                 KaraokeSession.GLOBAL_SESSION_ID,
                 currentPlaybackId,
-                selectedTrack,
+                snapshot.current().track(),
                 audienceTarget(),
                 snapshot.offset(),
-                scheduledStart,
+                Instant.now().plus(SERVER_STREAM_START_DELAY),
                 "rejoin-sync",
                 Duration.ZERO,
-                streamSupported ? AudioDeliveryMode.SERVER_STREAM : AudioDeliveryMode.URL);
-        if (clientRegistry.isCompatible(player.getUniqueId())) {
-            playbackClientIds.add(player.getUniqueId());
-            messenger.send(player, packet);
-            if (streamSupported) {
-                startAudioRelay(selectedTrack, packet, List.of(player));
-            }
-        }
+                AudioDeliveryMode.URL);
+        playbackClientIds.add(player.getUniqueId());
+        messenger.send(player, packet);
     }
 
     public void setAudienceAll() {
@@ -418,10 +480,7 @@ public final class PlaybackCoordinator {
         }
     }
 
-    private void startAudioRelay(KaraokeTrack track, AudioCommandPacket packet, List<Player> recipients) {
-        if (recipients.isEmpty()) {
-            return;
-        }
+    private void startAudioRelay(KaraokeTrack track, AudioCommandPacket packet) {
         String playbackId = packet.playbackId();
         audioStreamRelay.relay(
                 packet.sessionId(),
@@ -433,7 +492,10 @@ public final class PlaybackCoordinator {
                 packet.reason(),
                 streamPacket -> Bukkit.getScheduler().runTask(plugin, () -> {
                     if (playbackId.equals(currentPlaybackId)) {
-                        broadcastTo(recipients, streamPacket);
+                        if (streamPacket instanceof AudioStreamChunkPacket chunk) {
+                            recordStreamChunk(chunk);
+                        }
+                        broadcastTo(streamListeners(), streamPacket);
                     }
                 }),
                 () -> playbackId.equals(currentPlaybackId)
@@ -441,6 +503,30 @@ public final class PlaybackCoordinator {
             plugin.getLogger().log(java.util.logging.Level.WARNING, "Server audio relay failed for " + track.title(), error);
             return null;
         });
+    }
+
+    private List<Player> streamListeners() {
+        List<Player> listeners = new ArrayList<>(streamListenerIds.size());
+        for (UUID listenerId : streamListenerIds) {
+            Player listener = Bukkit.getPlayer(listenerId);
+            if (listener != null) {
+                listeners.add(listener);
+            }
+        }
+        return listeners;
+    }
+
+    private void recordStreamChunk(AudioStreamChunkPacket chunk) {
+        recentStreamChunks.addLast(chunk);
+        // Base64 expands by 4/3, so this recovers the decoded PCM length closely
+        // enough for a buffer cap.
+        recentStreamChunkBytes += chunk.data().length() * 3L / 4L;
+        long bytesPerSecond = (long) (chunk.sampleRate() * chunk.channels() * (chunk.bitsPerSample() / 8));
+        long tailCapBytes = Math.max(MIN_REJOIN_TAIL_BYTES, bytesPerSecond * STREAM_REJOIN_TAIL.getSeconds());
+        while (recentStreamChunkBytes > tailCapBytes && recentStreamChunks.size() > 1) {
+            AudioStreamChunkPacket evicted = recentStreamChunks.removeFirst();
+            recentStreamChunkBytes -= evicted.data().length() * 3L / 4L;
+        }
     }
 
     private List<Player> recipients() {
@@ -455,9 +541,14 @@ public final class PlaybackCoordinator {
         cancelAutoAdvance();
         autoAdvanceTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
             autoAdvanceTask = -1;
-            if (currentPlaybackId != null && currentPlaybackId.equals(playbackId) && !timerStarted) {
-                startPlaybackTimer(track, playbackId, "client start timeout", false);
+            if (currentPlaybackId == null || !currentPlaybackId.equals(playbackId) || timerStarted) {
+                return;
             }
+            if (activePlaybackClientIds().isEmpty()) {
+                startPlaybackTimer(track, playbackId, "client start timeout with no active clients", false);
+                return;
+            }
+            schedulePlaybackStartFallback(track, playbackId);
         }, Math.max(1L, CLIENT_START_TIMEOUT_SECONDS * 20L)).getTaskId();
     }
 
@@ -608,8 +699,7 @@ public final class PlaybackCoordinator {
     }
 
     private static boolean isTerminal(ClientPlaybackState state) {
-        return state == ClientPlaybackState.READY
-                || state == ClientPlaybackState.STOPPED
+        return state == ClientPlaybackState.STOPPED
                 || state == ClientPlaybackState.ERROR;
     }
 

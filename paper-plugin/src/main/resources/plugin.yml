@@ -40,9 +40,9 @@ permissions:
   evilkaraoke.command.queue.resume:
     default: op
   evilkaraoke.command.queue.previous:
-    default: op
+    default: true
   evilkaraoke.command.queue.next:
-    default: op
+    default: true
   evilkaraoke.command.queue.stop:
     default: op
   evilkaraoke.command.current:

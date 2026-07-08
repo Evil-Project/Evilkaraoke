@@ -18,6 +18,7 @@ playback:
   defaultVolume: 1.0
   defaultPitch: 1.0
   defaultMinVolume: 0.0
+  # Deprecated: /ek randomsong now shows all random API results by pages.
   randomCacheSize: 2
   pauseBetweenSongsSeconds: 3
   requireClientMod: true
@@ -32,5 +33,6 @@ permissions:
   defaultControlAllowed: false
 
 debug:
+  # Writes compact protocol packet summaries to the Minecraft server console.
   logPackets: false
   logApiRequests: false

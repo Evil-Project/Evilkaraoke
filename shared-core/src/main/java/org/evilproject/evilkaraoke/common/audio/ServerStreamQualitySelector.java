@@ -20,22 +20,14 @@ public final class ServerStreamQualitySelector {
         if (!hasDistinctFallback(track)) {
             return new Selection(track, StreamQuality.LOW_TRAFFIC, "single-asset");
         }
+        // Clients receive server-decoded PCM, so the wire rate is (nearly) the same
+        // whichever asset is decoded. High quality is therefore the default; only an
+        // explicit distress signal from a client downgrades the selection.
         Collection<ClientHealth> health = clients == null ? List.of() : clients;
-        if (health.isEmpty()) {
-            return new Selection(track, StreamQuality.LOW_TRAFFIC, "no-client-health");
-        }
-        boolean hasKnownSignal = false;
         for (ClientHealth client : health) {
-            if (client == null) {
-                continue;
-            }
-            hasKnownSignal = hasKnownSignal || client.hasKnownSignal();
-            if (client.needsLowTraffic()) {
+            if (client != null && client.needsLowTraffic()) {
                 return new Selection(track, StreamQuality.LOW_TRAFFIC, client.lowTrafficReason());
             }
-        }
-        if (!hasKnownSignal) {
-            return new Selection(track, StreamQuality.LOW_TRAFFIC, "unknown-client-health");
         }
         return new Selection(highQualityTrack(track), StreamQuality.HIGH_QUALITY, "audience-healthy");
     }
@@ -82,14 +74,6 @@ public final class ServerStreamQualitySelector {
             streamBytesRead = Math.max(0L, streamBytesRead);
             streamQueuedBytes = Math.max(0, streamQueuedBytes);
             streamMissingChunks = Math.max(0L, streamMissingChunks);
-        }
-
-        public boolean hasKnownSignal() {
-            return pingMillis >= 0
-                    || streamBytesReceived > 0
-                    || streamBytesRead > 0
-                    || streamQueuedBytes > 0
-                    || streamMissingChunks > 0;
         }
 
         public boolean needsLowTraffic() {

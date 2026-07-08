@@ -46,7 +46,11 @@ public final class NeurokaraokeClient {
     }
 
     public CompletableFuture<KaraokeTrack> randomSong() {
-        return getJson(endpoints.randomUrl()).thenApply(this::trackFromJson);
+        return randomSongs().thenApply(java.util.List::getFirst);
+    }
+
+    public CompletableFuture<java.util.List<KaraokeTrack>> randomSongs() {
+        return getJson(endpoints.randomUrl()).thenApply(this::tracksFromSongJson);
     }
 
     public CompletableFuture<KaraokeTrack> song(String id) {
@@ -228,7 +232,23 @@ public final class NeurokaraokeClient {
     }
 
     KaraokeTrack trackFromJson(String json) {
-        return trackFromElement(firstTrackElement(json));
+        return tracksFromSongJson(json).getFirst();
+    }
+
+    java.util.List<KaraokeTrack> tracksFromSongJson(String json) {
+        JsonElement parsed = parse(json);
+        if (parsed == null || parsed.isJsonNull()) {
+            throw new IllegalStateException("Neurokaraoke API returned no song data");
+        }
+        java.util.List<JsonElement> elements = trackElements(parsed);
+        if (elements.isEmpty()) {
+            throw new IllegalStateException("Neurokaraoke API returned no songs");
+        }
+        java.util.List<KaraokeTrack> tracks = new java.util.ArrayList<>();
+        for (JsonElement element : elements) {
+            tracks.add(trackFromElement(element));
+        }
+        return tracks;
     }
 
     java.util.List<KaraokeTrack> tracksFromSearchJson(String json) {
@@ -324,40 +344,33 @@ public final class NeurokaraokeClient {
         throw new IllegalStateException("Neurokaraoke API returned unsupported setlist data");
     }
 
-    private JsonElement firstTrackElement(String json) {
-        JsonElement parsed;
-        try {
-            parsed = JsonParser.parseString(json);
-        } catch (JsonParseException ex) {
-            throw new IllegalStateException("Neurokaraoke API returned invalid JSON", ex);
-        }
-        if (parsed == null || parsed.isJsonNull()) {
-            throw new IllegalStateException("Neurokaraoke API returned no song data");
-        }
+    private java.util.List<JsonElement> trackElements(JsonElement parsed) {
         if (parsed.isJsonArray()) {
             JsonArray array = parsed.getAsJsonArray();
-            if (array.isEmpty()) {
-                throw new IllegalStateException("Neurokaraoke API returned no songs");
+            java.util.List<JsonElement> elements = new java.util.ArrayList<>();
+            for (JsonElement element : array) {
+                elements.add(element);
             }
-            return array.get(0);
+            return elements;
         }
         if (parsed.isJsonObject()) {
             JsonObject object = parsed.getAsJsonObject();
             for (String key : java.util.List.of("song", "track", "result")) {
                 if (object.has(key) && object.get(key).isJsonObject()) {
-                    return object.get(key);
+                    return java.util.List.of(object.get(key));
                 }
             }
             for (String key : java.util.List.of("results", "songs")) {
                 if (object.has(key) && object.get(key).isJsonArray()) {
                     JsonArray array = object.getAsJsonArray(key);
-                    if (array.isEmpty()) {
-                        throw new IllegalStateException("Neurokaraoke API returned no songs");
+                    java.util.List<JsonElement> elements = new java.util.ArrayList<>();
+                    for (JsonElement element : array) {
+                        elements.add(element);
                     }
-                    return array.get(0);
+                    return elements;
                 }
             }
-            return object;
+            return java.util.List.of(object);
         }
         throw new IllegalStateException("Neurokaraoke API returned unsupported song data");
     }

@@ -71,6 +71,31 @@ class NeurokaraokeClientTest {
     }
 
     @Test
+    void randomSongsParsesSongList() {
+        var tracks = client.tracksFromSongJson("""
+                [{
+                  "id": "song-1",
+                  "title": "First",
+                  "originalArtists": ["Artist One"],
+                  "coverArtists": ["Neuro"],
+                  "opus": "song-opus/first.ogg"
+                }, {
+                  "id": "song-2",
+                  "title": "Second",
+                  "originalArtists": ["Artist Two"],
+                  "coverArtists": ["Evil"],
+                  "opus": "song-opus/second.ogg"
+                }]
+                """);
+
+        assertEquals(2, tracks.size());
+        assertEquals("song-1", tracks.getFirst().id());
+        assertEquals("First", tracks.getFirst().title());
+        assertEquals("Artist One", tracks.getFirst().artist());
+        assertEquals("song-2", tracks.get(1).id());
+    }
+
+    @Test
     void playlistSummariesCanHaveNullSongList() {
         var playlists = client.setlistsFromJson("""
                 [{

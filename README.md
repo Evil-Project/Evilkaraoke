@@ -47,7 +47,7 @@ Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and N
 /ek queue move 2 1          # Move your queued song earlier
 /ek queue pause             # Pause (ops only)
 /ek queue resume            # Resume (ops only)
-/ek queue next              # Skip to next (ops only)
+/ek queue next              # Skip to next
 ```
 
 ## Installation
@@ -103,16 +103,20 @@ All commands use `/ek`.
 
 - `/ek help` — Show command help
 - `/ek search <query>` — Search for songs without queueing
+- `/ek search queue-all` — Queue the latest search result page shown to you
 - `/ek request <query>` — Search and queue a song
 - `/ek request id <songId>` — Queue a song by Neurokaraoke song id
 - `/ek request url <https://...> [title]` — Queue a direct public audio URL
 - `/ek setlist [page]` — Browse Neurokaraoke setlists
 - `/ek playlist [page]` — Browse public Neurokaraoke playlists and queue one by row
 - `/ek queue` — Show upcoming tracks
+- `/ek queue previous` — Return to the previous track
+- `/ek queue next` — Skip current track
 - `/ek queue move <from> <to>` — Reorder your queued requested songs
 - `/ek queue cancel <position|all>` — Remove one or all of your queued songs
 - `/ek current` — Show currently playing track
-- `/ek randomsong` — Queue a random song
+- `/ek randomsong [page]` — Show a paged random-song playlist with queue-one and queue-all actions
+- `/ek randomsong queue <all|row>` — Queue all latest random songs or one row from the latest random-song playlist
 - `/ek stats me` — View your statistics
 - `/ek stats server` — View server statistics
 
@@ -120,8 +124,6 @@ All commands use `/ek`.
 
 - `/ek queue pause` — Pause current playback
 - `/ek queue resume` — Resume paused playback
-- `/ek queue previous` — Return to the previous track
-- `/ek queue next` — Skip current track
 - `/ek queue stop` — Stop current playback
 - `/ek audience <@a|@s|player>` — Set playback target (all/@a, self/@s, or specific player)
 - `/ek radio <radio21|swarmfm>` — Start radio mode
@@ -137,19 +139,19 @@ All commands use `/ek`.
 evilkaraoke.command.help: true           # Help command
 evilkaraoke.command.search: true         # Search songs
 evilkaraoke.command.request: true        # Queue songs
-evilkaraoke.command.randomsong: true     # Queue a random song
+evilkaraoke.command.randomsong: true     # Show and queue random song playlists
 evilkaraoke.command.setlist: true        # Browse and queue setlists
 evilkaraoke.command.playlist: true       # Browse and queue public playlists
 evilkaraoke.command.issue: true          # Troubleshooting help
 evilkaraoke.command.queue: true          # View queue
 evilkaraoke.command.queue.move: true     # Move your queued songs
 evilkaraoke.command.queue.cancel: true   # Cancel own queued songs
-evilkaraoke.command.queue.random: true   # Toggle random queue playback
+evilkaraoke.command.queue.random: true   # Shuffle/toggle random queue order
 evilkaraoke.command.queue.loop: true     # Toggle queue or single-song loop
 evilkaraoke.command.queue.pause: op      # Pause playback
 evilkaraoke.command.queue.resume: op     # Resume playback
-evilkaraoke.command.queue.previous: op   # Go to previous track
-evilkaraoke.command.queue.next: op       # Skip to next track
+evilkaraoke.command.queue.previous: true # Go to previous track
+evilkaraoke.command.queue.next: true     # Skip to next track
 evilkaraoke.command.queue.stop: op       # Stop playback
 evilkaraoke.command.current: true        # View current track
 evilkaraoke.command.stats: true          # View statistics
@@ -243,6 +245,7 @@ playback:
   defaultVolume: 1.0
   defaultPitch: 1.0
   defaultMinVolume: 0.0
+  # Deprecated: /ek randomsong now shows all random API results by pages.
   randomCacheSize: 2
   pauseBetweenSongsSeconds: 3
   requireClientMod: true
@@ -260,6 +263,8 @@ debug:
   logPackets: false
   logApiRequests: false
 ```
+
+Set `debug.logPackets` to `true` to write compact packet summaries to the Minecraft server console.
 
 ### messages.yml
 

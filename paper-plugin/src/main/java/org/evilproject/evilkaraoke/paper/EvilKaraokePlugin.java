@@ -41,7 +41,7 @@ public final class EvilKaraokePlugin extends JavaPlugin {
         statsService.load();
 
         neurokaraokeClient = new NeurokaraokeClient(getLogger(), NeurokaraokeEndpoints.from(getConfig()));
-        PlaybackMessenger messenger = new PlaybackMessenger(this, packetCodec);
+        PlaybackMessenger messenger = new PlaybackMessenger(this, packetCodec, this::isPacketDebugLoggingEnabled);
         coordinator = new PlaybackCoordinator(this, clientRegistry, messenger, neurokaraokeClient, config);
 
         registerMessaging();
@@ -76,9 +76,13 @@ public final class EvilKaraokePlugin extends JavaPlugin {
 
     private void registerMessaging() {
         getServer().getMessenger().registerOutgoingPluginChannel(this, EvilKaraokeProtocol.AUDIO_CHANNEL);
-        EvilKaraokeMessageListener listener = new EvilKaraokeMessageListener(this, clientRegistry, packetCodec, coordinator);
+        EvilKaraokeMessageListener listener = new EvilKaraokeMessageListener(this, clientRegistry, packetCodec, coordinator, this::isPacketDebugLoggingEnabled);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilKaraokeProtocol.HELLO_CHANNEL, listener);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilKaraokeProtocol.STATUS_CHANNEL, listener);
+    }
+
+    private boolean isPacketDebugLoggingEnabled() {
+        return config != null && config.debugPackets();
     }
 
     private void registerCommands(PermissionService permissionService) {

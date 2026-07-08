@@ -110,6 +110,20 @@ class PlaybackCoordinatorTest {
     }
 
     @Test
+    void debugPacketsLogOutgoingAudioPacketsToPlatformLogger() {
+        coordinator.update(
+                new NeurokaraokeClient(Logger.getLogger("test"), NeurokaraokeEndpoints.defaults()),
+                new EvilKaraokeConfig("@a", "music", 1.0f, 1.0f, 0.0f, 2, 3L, false, true, true, 60, true));
+
+        coordinator.request(track("song", Duration.ofSeconds(60)), player).join();
+
+        assertTrue(platform.logs().stream().anyMatch(log ->
+                log.level() == Level.INFO
+                        && log.message().contains("Evilkaraoke debug packet OUT evilkaraoke:audio to Steve: AudioCommand command=PLAY")
+                        && log.message().contains("playbackId=")));
+    }
+
+    @Test
     void clientsWithoutServerStreamSupportReceiveUrlPlayPacket() {
         KaraokePlayer alex = new KaraokePlayer(UUID.randomUUID(), "Alex");
         platform.addPlayer(alex);
@@ -173,6 +187,24 @@ class PlaybackCoordinatorTest {
         assertNotNull(secondPlay);
         assertEquals("second", secondPlay.track().id());
         assertFalse(firstPlay.playbackId().equals(secondPlay.playbackId()));
+    }
+
+    @Test
+    void readyStatusFromCurrentPlaybackDoesNotAdvanceQueue() {
+        coordinator.request(track("first", Duration.ofSeconds(60)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket firstPlay = platform.lastPacket(AudioCommandType.PLAY);
+        assertNotNull(firstPlay);
+
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.READY, Duration.ZERO, "Audio backend ready"));
+
+        assertEquals("first", coordinator.snapshot().current().track().id());
+        assertEquals(List.of("second"), coordinator.queue().stream()
+                .map(queued -> queued.track().id())
+                .toList());
+        assertEquals(firstPlay.playbackId(), platform.lastPacket(AudioCommandType.PLAY).playbackId());
     }
 
     @Test
@@ -248,15 +280,30 @@ class PlaybackCoordinatorTest {
     }
 
     @Test
-    void fallbackStartsTimerWhenNoClientReportsPlaying() {
+    void fallbackWaitsWhileClientHasNotStartedPlaying() {
         coordinator.request(track("song", Duration.ofSeconds(5)), player).join();
 
         FakePlatform.ScheduledTask fallback = platform.onlyScheduledTask();
         platform.runScheduled(fallback.id());
 
+        FakePlatform.ScheduledTask retry = platform.onlyScheduledTask();
+        assertEquals(200L, retry.delayTicks());
+        assertEquals(Duration.ZERO, coordinator.snapshot().offset(),
+                "loading clients should not start the server-side playback counter");
+    }
+
+    @Test
+    void fallbackStartsTimerWhenNoActiveClientCanConfirmPlayback() {
+        coordinator.request(track("song", Duration.ofSeconds(5)), player).join();
+
+        FakePlatform.ScheduledTask fallback = platform.onlyScheduledTask();
+        clientRegistry.unregister(player.id());
+        platform.removePlayer(player.id());
+        platform.runScheduled(fallback.id());
+
         FakePlatform.ScheduledTask autoAdvance = platform.onlyScheduledTask();
         assertTrue(autoAdvance.delayTicks() <= 300L && autoAdvance.delayTicks() >= 298L,
-                "fallback should schedule duration plus buffer after the start timeout fires");
+                "fallback should only start the counter once no active client can confirm playback");
     }
 
     @Test
@@ -331,7 +378,7 @@ class PlaybackCoordinatorTest {
     }
 
     @Test
-    void syncPlayerUsesCurrentPlaybackId() {
+    void syncPlayerAttachesJoinerToGlobalRelayWithBufferedTail() {
         coordinator.request(track("song", Duration.ofSeconds(60)), player).join();
         AudioCommandPacket play = platform.lastPacket(AudioCommandType.PLAY);
         coordinator.handleClientStatus(
@@ -346,7 +393,73 @@ class PlaybackCoordinatorTest {
         AudioCommandPacket syncPlay = platform.lastPacket(AudioCommandType.PLAY);
         assertEquals(play.playbackId(), syncPlay.playbackId());
         assertEquals(AudioDeliveryMode.SERVER_STREAM, syncPlay.deliveryMode());
-        assertEquals(2, audioStreamRelay.relayCalls);
+        assertEquals(1, audioStreamRelay.relayCalls, "a joiner must attach to the global relay, not spawn a second one");
+        assertEquals(1, platform.packetCount(lateJoiner, AudioStreamChunkPacket.class),
+                "the buffered tail should be replayed to the joiner");
+
+        audioStreamRelay.lastBroadcaster.accept(AudioStreamChunkPacket.chunk(
+                KaraokeSession.GLOBAL_SESSION_ID, play.playbackId(), 1, new byte[] {4, 5}, 2));
+
+        assertEquals(2, platform.packetCount(lateJoiner, AudioStreamChunkPacket.class),
+                "live chunks should keep flowing to the joiner");
+    }
+
+    @Test
+    void relayStartsAndQueueAdvancesWithNoPlayersOnline() {
+        clientRegistry.unregister(player.id());
+        platform.removePlayer(player.id());
+
+        coordinator.request(track("first", Duration.ofSeconds(60)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+
+        assertEquals(1, audioStreamRelay.relayCalls, "server-side decoding must run even with no players");
+        assertTrue(audioStreamRelay.lastShouldContinue.getAsBoolean());
+
+        FakePlatform.ScheduledTask fallback = platform.onlyScheduledTask();
+        platform.runScheduled(fallback.id());
+        FakePlatform.ScheduledTask autoAdvance = platform.onlyScheduledTask();
+        platform.runScheduled(autoAdvance.id());
+
+        assertEquals("second", coordinator.snapshot().current().track().id());
+        assertEquals(2, audioStreamRelay.relayCalls, "the next queued song must also decode with no players");
+    }
+
+    @Test
+    void relayKeepsDecodingAfterLastListenerLeaves() {
+        coordinator.request(track("song", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket play = platform.lastPacket(AudioCommandType.PLAY);
+        int chunksBeforeLeave = platform.packetCount(player, AudioStreamChunkPacket.class);
+
+        clientRegistry.unregister(player.id());
+        platform.removePlayer(player.id());
+
+        assertTrue(audioStreamRelay.lastShouldContinue.getAsBoolean(),
+                "the relay must keep decoding after the last player leaves");
+        audioStreamRelay.lastBroadcaster.accept(AudioStreamChunkPacket.chunk(
+                KaraokeSession.GLOBAL_SESSION_ID, play.playbackId(), 1, new byte[] {4}, 1));
+        assertEquals(chunksBeforeLeave, platform.packetCount(player, AudioStreamChunkPacket.class));
+    }
+
+    @Test
+    void rejoiningPlayerReceivesOnlyBufferedTailWorthOfChunks() {
+        coordinator.request(track("song", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket play = platform.lastPacket(AudioCommandType.PLAY);
+        // Stream far more than the rejoin tail window (8s at 48kHz stereo 16-bit
+        // is ~1.5 MiB); the tail buffer must stay bounded.
+        byte[] chunk = new byte[16 * 1024];
+        for (int sequence = 1; sequence <= 200; sequence++) {
+            audioStreamRelay.lastBroadcaster.accept(AudioStreamChunkPacket.chunk(
+                    KaraokeSession.GLOBAL_SESSION_ID, play.playbackId(), sequence, chunk, chunk.length));
+        }
+        KaraokePlayer lateJoiner = new KaraokePlayer(UUID.randomUUID(), "Alex");
+        platform.addPlayer(lateJoiner);
+        registerClient(lateJoiner);
+
+        coordinator.syncPlayer(lateJoiner);
+
+        int replayed = platform.packetCount(lateJoiner, AudioStreamChunkPacket.class);
+        assertTrue(replayed > 0, "the joiner should receive buffered tail chunks");
+        assertTrue(replayed < 120, "the tail replay must be bounded to the prebuffer window, got " + replayed);
     }
 
     @Test
@@ -499,6 +612,7 @@ class PlaybackCoordinatorTest {
         private final Map<Integer, ScheduledTask> scheduledTasks = new LinkedHashMap<>();
         private final Map<UUID, Integer> pings = new LinkedHashMap<>();
         private final List<Integer> cancelledTaskIds = new ArrayList<>();
+        private final List<LogEntry> logs = new ArrayList<>();
         private int nextTaskId = 1;
 
         private FakePlatform(KaraokePlayer player) {
@@ -562,6 +676,7 @@ class PlaybackCoordinatorTest {
 
         @Override
         public void log(Level level, String message, Throwable error) {
+            logs.add(new LogEntry(level, message, error));
         }
 
         private ScheduledTask onlyScheduledTask() {
@@ -581,6 +696,10 @@ class PlaybackCoordinatorTest {
 
         private List<Integer> cancelledTaskIds() {
             return cancelledTaskIds;
+        }
+
+        private List<LogEntry> logs() {
+            return logs;
         }
 
         private AudioCommandPacket lastPacket(AudioCommandType type) {
@@ -617,6 +736,9 @@ class PlaybackCoordinatorTest {
         }
 
         private record SentPacket(KaraokePlayer player, ProtocolPacket packet) {
+        }
+
+        private record LogEntry(Level level, String message, Throwable error) {
         }
 
         private record ScheduledTask(int id, long delayTicks, Runnable task) {

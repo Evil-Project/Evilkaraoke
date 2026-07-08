@@ -88,7 +88,6 @@ class JavaSoundAudioBackendTest {
     @Test
     void serverStreamPacketsDecodeThroughControllerAndWritePcmToLine() throws Exception {
         byte[] pcm = pcm16(5000, -5000, 6000, -6000);
-        byte[] wav = wav(pcm, 44_100, 1);
         RecordingLine line = new RecordingLine();
         JavaSoundAudioBackend backend = new JavaSoundAudioBackend(uri -> uri, format -> line);
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
@@ -109,9 +108,10 @@ class JavaSoundAudioBackendTest {
 
         controller.handleAudioPayload(codec.encode(play));
         int sequence = 0;
-        for (int offset = 0; offset < wav.length; offset += 19) {
-            byte[] slice = java.util.Arrays.copyOfRange(wav, offset, Math.min(wav.length, offset + 19));
-            controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", playbackId, sequence++, slice, slice.length)));
+        for (int offset = 0; offset < pcm.length; offset += 3) {
+            byte[] slice = java.util.Arrays.copyOfRange(pcm, offset, Math.min(pcm.length, offset + 3));
+            controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.chunk("global", playbackId, sequence++,
+                    slice, slice.length, 44_100.0f, 1, 16)));
         }
         controller.handleAudioPayload(codec.encode(AudioStreamChunkPacket.end("global", playbackId, sequence)));
 

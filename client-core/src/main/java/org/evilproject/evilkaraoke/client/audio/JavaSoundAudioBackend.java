@@ -119,6 +119,37 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     }
 
     @Override
+    public void playPcmStream(AudioCommandPacket packet, InputStream source, float sampleRate, int channels, int bitsPerSample) {
+        stopCurrent();
+        KaraokeTrack track = packet.track();
+        if (track == null) {
+            status = AudioBackendStatus.error("PLAY packet had no track");
+            closeQuietly(source);
+            return;
+        }
+        if (source == null) {
+            status = AudioBackendStatus.error("PLAY packet had no server audio stream");
+            return;
+        }
+        serverGain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
+        AudioFormat format = new AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                sampleRate > 0.0f ? sampleRate : PcmFormat.SAMPLE_RATE,
+                bitsPerSample > 0 ? bitsPerSample : PcmFormat.BITS_PER_SAMPLE,
+                channels > 0 ? channels : PcmFormat.CHANNELS,
+                (channels > 0 ? channels : PcmFormat.CHANNELS) * ((bitsPerSample > 0 ? bitsPerSample : PcmFormat.BITS_PER_SAMPLE) / 8),
+                sampleRate > 0.0f ? sampleRate : PcmFormat.SAMPLE_RATE,
+                false);
+        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), Duration.ZERO, packet.serverTime());
+        current.set(handle);
+        Thread thread = new Thread(() -> runPcmPlayback(handle, track, source, format), "evilkaraoke-audio-" + packet.playbackId());
+        thread.setDaemon(true);
+        handle.thread = thread;
+        status = new AudioBackendStatus(ClientPlaybackState.BUFFERING, "Buffering " + track.title());
+        thread.start();
+    }
+
+    @Override
     public void pause(AudioCommandPacket packet) {
         PlaybackHandle handle = current.get();
         if (handle != null && !handle.stopped) {
@@ -200,6 +231,17 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         }
     }
 
+    private void runPcmPlayback(PlaybackHandle handle, KaraokeTrack track, InputStream source, AudioFormat format) {
+        try {
+            Exception error = tryPlayPcmStream(handle, source, format);
+            if (error != null && !handle.stopped) {
+                failPlayback(handle, track, error);
+            }
+        } finally {
+            current.compareAndSet(handle, null);
+        }
+    }
+
     private void failPlayback(PlaybackHandle handle, KaraokeTrack track, Exception error) {
         String message = "Could not decode " + track.title() + ": " + error.getMessage();
         handle.stopped = true;
@@ -230,6 +272,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 if (handle.stopped) {
                     return null;
                 }
+                prefillLine(handle, pcm, line);
                 waitForScheduledStart(handle);
                 if (handle.stopped) {
                     return null;
@@ -283,6 +326,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 if (handle.stopped) {
                     return null;
                 }
+                prefillLine(handle, pcm, line);
                 waitForScheduledStart(handle);
                 if (handle.stopped) {
                     return null;
@@ -311,6 +355,42 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             return ex;
         } finally {
             worker.setContextClassLoader(previousLoader);
+        }
+    }
+
+    private Exception tryPlayPcmStream(PlaybackHandle handle, InputStream source, AudioFormat format) {
+        try (InputStream serverSource = trackedBody(handle, source);
+             AudioInputStream pcm = new AudioInputStream(serverSource, format, AudioSystem.NOT_SPECIFIED)) {
+            SourceDataLine line = openLine(format);
+            handle.line = line;
+            try {
+                prefillLine(handle, pcm, line);
+                waitForScheduledStart(handle);
+                if (handle.stopped) {
+                    return null;
+                }
+                handle.playbackReleased = true;
+                if (!handle.paused) {
+                    line.start();
+                }
+                status = handle.paused
+                        ? new AudioBackendStatus(ClientPlaybackState.PAUSED, "Paused")
+                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+                pump(handle, pcm, line);
+                if (!handle.stopped) {
+                    line.drain();
+                    status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+                }
+                return null;
+            } catch (Exception ex) {
+                return ex;
+            } finally {
+                handle.line = null;
+                line.stop();
+                line.close();
+            }
+        } catch (Exception ex) {
+            return ex;
         }
     }
 
@@ -505,6 +585,37 @@ public final class JavaSoundAudioBackend implements AudioBackend {
             }
         } catch (Exception ignored) {
             // If seek fails, play from the beginning — not ideal but not fatal.
+        }
+    }
+
+    /**
+     * Fills the line buffer before playback starts. When the stream's first
+     * bytes arrive after the scheduled start (origin latency plus decoder
+     * startup often exceed the lead time), starting the line with only one
+     * packet of audio queued makes every track open with rapid underruns while
+     * delivery ramps up; a full line buffer of lead-in absorbs that jitter.
+     * Blocks until the buffer is full or the source hits EOF.
+     */
+    private void prefillLine(PlaybackHandle handle, AudioInputStream pcm, SourceDataLine line) throws InterruptedException, java.io.IOException {
+        byte[] buffer = new byte[8_192];
+        while (!handle.stopped) {
+            int free = line.available();
+            if (free <= 0) {
+                return;
+            }
+            int read = pcm.read(buffer, 0, Math.min(buffer.length, free));
+            if (read == -1) {
+                return;
+            }
+            applySoftwareGain(buffer, read, effectiveGain());
+            int offset = 0;
+            while (offset < read && !handle.stopped) {
+                int written = line.write(buffer, offset, read - offset);
+                if (written == 0) {
+                    Thread.sleep(1);
+                }
+                offset += written;
+            }
         }
     }
 
@@ -824,8 +935,20 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     private static SourceDataLine systemLine(AudioFormat format) throws Exception {
         DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
         SourceDataLine line = (SourceDataLine) AudioSystem.getLine(info);
-        line.open(format);
+        line.open(format, lineBufferBytes(format));
         return line;
+    }
+
+    /**
+     * Requests roughly half a second of line buffer. The platform default can be
+     * much smaller, and a small buffer turns any brief render-thread or GC stall
+     * into an audible dropout even while plenty of stream data is queued.
+     */
+    private static int lineBufferBytes(AudioFormat format) {
+        float frameRate = format.getFrameRate() > 0 ? format.getFrameRate() : PcmFormat.SAMPLE_RATE;
+        int frameSize = format.getFrameSize() > 0 ? format.getFrameSize() : PcmFormat.CHANNELS * (PcmFormat.BITS_PER_SAMPLE / 8);
+        int halfSecondFrames = Math.max(1, Math.round(frameRate / 2.0f));
+        return halfSecondFrames * frameSize;
     }
 
     private void stopCurrent() {
