@@ -2,7 +2,7 @@ plugins {
     `java-library`
 }
 
-val projectVersion = providers.gradleProperty("releaseVersion").orElse("1.0.0")
+val projectVersion = providers.gradleProperty("releaseVersion").orElse("1.0.1")
 
 allprojects {
     group = "org.evilproject"
