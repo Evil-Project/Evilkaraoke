@@ -279,7 +279,7 @@ Set `debug.logPackets` to `true` to write compact packet summaries to the Minecr
 
 ### messages.yml
 
-All user-facing messages are customizable with MiniMessage formatting support. Colors, hover text, click actions fully supported.
+The command prefix and common permission, player-only, unknown-command, and client-required responses are customizable with MiniMessage formatting. Changes are applied by `/ek reload`.
 
 ## Building
 

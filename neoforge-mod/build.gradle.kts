@@ -9,6 +9,12 @@ tasks.withType<Jar>().configureEach {
 neoForge {
     version = "26.2.0.7-beta"
 
+    mods {
+        create("evilkaraoke") {
+            sourceSet(sourceSets.main.get())
+        }
+    }
+
     runs {
         create("client") {
             client()

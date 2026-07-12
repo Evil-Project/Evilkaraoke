@@ -898,6 +898,9 @@ public final class EvilKaraokeCommandService {
     }
 
     private int control(CommandActor actor, String action, boolean refresh, String label, int page) {
+        if (!isQueuePlaybackControl(action)) {
+            return unknown(actor);
+        }
         if (!canUsePlaybackControl(actor, action)) {
             return deny(actor);
         }
@@ -907,10 +910,7 @@ public final class EvilKaraokeCommandService {
             case "next" -> core.coordinator().skip();
             case "previous" -> core.coordinator().previous();
             case "stop" -> core.coordinator().stop();
-            default -> {
-                unknown(actor);
-                yield false;
-            }
+            default -> throw new IllegalStateException("Unexpected playback control: " + action);
         };
         if (!applied) {
             actor.sendMessage(playbackControlUnavailableMessage(action));

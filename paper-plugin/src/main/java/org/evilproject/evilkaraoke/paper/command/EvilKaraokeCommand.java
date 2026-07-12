@@ -59,6 +59,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
     private final Runnable reloadCallback;
     private final EvilKaraokeConfig config;
     private final PermissionService permissionService;
+    private final PaperMessages messages;
     private final Map<UUID, List<KaraokeTrack>> randomSongSelections = new ConcurrentHashMap<>();
     private final Map<UUID, List<KaraokeTrack>> searchResultSelections = new ConcurrentHashMap<>();
 
@@ -69,6 +70,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
                               StatsService statsService,
                               EvilKaraokeConfig config,
                               PermissionService permissionService,
+                              PaperMessages messages,
                               Runnable reloadCallback) {
         this.plugin = plugin;
         this.clientRegistry = clientRegistry;
@@ -78,6 +80,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
         this.statsCommand = new StatsCommand(statsService, permissionService);
         this.config = config;
         this.permissionService = permissionService;
+        this.messages = messages;
         this.reloadCallback = reloadCallback;
     }
 
@@ -841,6 +844,9 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     private boolean control(CommandSender sender, String action, boolean refresh, String label, int page) {
+        if (!isQueuePlaybackControl(action)) {
+            return unknown(sender);
+        }
         if (!canUsePlaybackControl(sender, action)) {
             return deny(sender);
         }
@@ -850,10 +856,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
             case "next" -> coordinator.skip();
             case "previous" -> coordinator.previous();
             case "stop" -> coordinator.stop();
-            default -> {
-                unknown(sender);
-                yield false;
-            }
+            default -> throw new IllegalStateException("Unexpected playback control: " + action);
         };
         if (!applied) {
             sender.sendMessage(Component.text(playbackControlUnavailableMessage(action), NamedTextColor.YELLOW));
@@ -1260,12 +1263,12 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
     }
 
     private boolean unknown(CommandSender sender) {
-        sender.sendMessage(Component.text("Unknown Evilkaraoke subcommand. Try /ek help.", NamedTextColor.RED));
+        sender.sendMessage(messages.unknownCommand());
         return true;
     }
 
     private boolean deny(CommandSender sender) {
-        sender.sendMessage(Component.text("You do not have permission to use that Evilkaraoke command.", NamedTextColor.RED));
+        sender.sendMessage(messages.missingPermission());
         return true;
     }
 
@@ -1273,13 +1276,13 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
         if (sender instanceof Player) {
             return true;
         }
-        sender.sendMessage(Component.text("That command must be run by a player.", NamedTextColor.RED));
+        sender.sendMessage(messages.playerOnly());
         return false;
     }
 
     private void maybeWarnClient(Player player) {
         if (config.requireClientMod() && !clientRegistry.isCompatible(player.getUniqueId())) {
-            player.sendMessage(Component.text("Heads up: install or update the Evilkaraoke client mod to actually hear playback.", NamedTextColor.YELLOW));
+            player.sendMessage(messages.clientRequired());
         }
     }
 

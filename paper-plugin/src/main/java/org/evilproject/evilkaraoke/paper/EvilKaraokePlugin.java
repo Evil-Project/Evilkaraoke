@@ -1,5 +1,6 @@
 package org.evilproject.evilkaraoke.paper;
 
+import java.io.File;
 import java.nio.file.Path;
 import java.util.Objects;
 
@@ -11,6 +12,7 @@ import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeEndpoints;
 import org.evilproject.evilkaraoke.paper.command.EvilKaraokeCommand;
+import org.evilproject.evilkaraoke.paper.command.PaperMessages;
 import org.evilproject.evilkaraoke.paper.config.EvilKaraokeConfig;
 import org.evilproject.evilkaraoke.paper.messaging.ClientRegistry;
 import org.evilproject.evilkaraoke.paper.messaging.EvilKaraokeMessageListener;
@@ -23,6 +25,7 @@ public final class EvilKaraokePlugin extends JavaPlugin {
     private final ClientRegistry clientRegistry = new ClientRegistry();
     private final JsonPacketCodec packetCodec = new JsonPacketCodec();
     private EvilKaraokeConfig config;
+    private PaperMessages messages;
     private EvilKaraokeCommand command;
     private PermissionService permissionService;
     private StatsService statsService;
@@ -34,7 +37,8 @@ public final class EvilKaraokePlugin extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         permissionService = new PermissionService(getLogger());
-        saveResource("messages.yml", false);
+        saveMessagesResource();
+        messages = PaperMessages.load(this);
         config = EvilKaraokeConfig.from(getConfig());
 
         statsService = new StatsService(getLogger(), Path.of(getDataFolder().getPath(), "stats.json"));
@@ -66,6 +70,7 @@ public final class EvilKaraokePlugin extends JavaPlugin {
 
     public void reloadEvilKaraokeConfig() {
         reloadConfig();
+        messages = PaperMessages.load(this);
         config = EvilKaraokeConfig.from(getConfig());
         neurokaraokeClient = new NeurokaraokeClient(getLogger(), NeurokaraokeEndpoints.from(getConfig()));
         if (coordinator != null) {
@@ -87,7 +92,7 @@ public final class EvilKaraokePlugin extends JavaPlugin {
     }
 
     private void registerCommands(PermissionService permissionService) {
-        command = new EvilKaraokeCommand(this, clientRegistry, coordinator, neurokaraokeClient, statsService, config, permissionService, this::reloadEvilKaraokeConfig);
+        command = new EvilKaraokeCommand(this, clientRegistry, coordinator, neurokaraokeClient, statsService, config, permissionService, messages, this::reloadEvilKaraokeConfig);
         PluginCommand pluginCommand = Objects.requireNonNull(getCommand("ek"), "ek command missing from plugin.yml");
         pluginCommand.setExecutor(command);
         pluginCommand.setTabCompleter(command);
@@ -96,5 +101,11 @@ public final class EvilKaraokePlugin extends JavaPlugin {
     private void scheduleStatsSave() {
         long intervalTicks = Math.max(20L, getConfig().getLong("stats.saveIntervalSeconds", 60L) * 20L);
         statsSaveTask = getServer().getScheduler().runTaskTimerAsynchronously(this, () -> statsService.save(), intervalTicks, intervalTicks);
+    }
+
+    private void saveMessagesResource() {
+        if (!new File(getDataFolder(), "messages.yml").isFile()) {
+            saveResource("messages.yml", false);
+        }
     }
 }
