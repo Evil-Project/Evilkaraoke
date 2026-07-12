@@ -11,8 +11,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 import java.util.logging.Level;
@@ -49,6 +51,9 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     private static final int MAX_REDIRECTS = 5;
     private static final int AUDIO_SIGNATURE_BYTES = 512;
     private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    // The server schedules starts only ~2s ahead; anything beyond this bound is
+    // client/server clock skew, which must not delay (or stall) every track.
+    private static final Duration MAX_SCHEDULED_START_WAIT = Duration.ofSeconds(10);
     private static final Pattern CONTENT_RANGE = Pattern.compile("bytes (\\d+)-(\\d+)/(\\d+|\\*)");
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -85,7 +90,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         }
         serverGain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
         Duration seekOffset = packet.offset() != null ? packet.offset() : Duration.ZERO;
-        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), seekOffset, packet.serverTime());
+        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), seekOffset, seekOffset, packet.serverTime());
         current.set(handle);
         Thread thread = new Thread(() -> runPlayback(handle, track), "evilkaraoke-audio-" + packet.playbackId());
         thread.setDaemon(true);
@@ -109,7 +114,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         }
         serverGain = packet.target() == null ? 1.0f : clamp01(packet.target().volume());
         Duration seekOffset = packet.offset() != null ? packet.offset() : Duration.ZERO;
-        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), seekOffset, packet.serverTime());
+        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), seekOffset, seekOffset, packet.serverTime());
         current.set(handle);
         Thread thread = new Thread(() -> runPlayback(handle, track, source), "evilkaraoke-audio-" + packet.playbackId());
         thread.setDaemon(true);
@@ -140,7 +145,8 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 (channels > 0 ? channels : PcmFormat.CHANNELS) * ((bitsPerSample > 0 ? bitsPerSample : PcmFormat.BITS_PER_SAMPLE) / 8),
                 sampleRate > 0.0f ? sampleRate : PcmFormat.SAMPLE_RATE,
                 false);
-        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), Duration.ZERO, packet.serverTime());
+        Duration timelineOffset = packet.offset() != null ? packet.offset() : Duration.ZERO;
+        PlaybackHandle handle = new PlaybackHandle(packet.playbackId(), Duration.ZERO, timelineOffset, packet.serverTime());
         current.set(handle);
         Thread thread = new Thread(() -> runPcmPlayback(handle, track, source, format), "evilkaraoke-audio-" + packet.playbackId());
         thread.setDaemon(true);
@@ -186,6 +192,23 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     @Override
     public AudioBackendStatus status() {
         return status;
+    }
+
+    @Override
+    public Optional<Duration> playbackPosition() {
+        PlaybackHandle handle = current.get();
+        if (handle == null || !handle.playbackReleased) {
+            return Optional.empty();
+        }
+        SourceDataLine line = handle.line;
+        if (line == null) {
+            return Optional.empty();
+        }
+        return Optional.of(timelinePosition(handle.timelineOffset, line.getMicrosecondPosition()));
+    }
+
+    static Duration timelinePosition(Duration offset, long microseconds) {
+        return offset.plus(Duration.of(Math.max(0L, microseconds), ChronoUnit.MICROS));
     }
 
     /** Applies a new linear gain (0..1), e.g. from a VOLUME packet or listener move. */
@@ -245,9 +268,24 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     private void failPlayback(PlaybackHandle handle, KaraokeTrack track, Exception error) {
         String message = "Could not decode " + track.title() + ": " + error.getMessage();
         handle.stopped = true;
-        current.compareAndSet(handle, null);
-        status = AudioBackendStatus.error(message);
+        if (current.compareAndSet(handle, null)) {
+            status = AudioBackendStatus.error(message);
+        }
         LOGGER.log(Level.WARNING, "Evilkaraoke client playback failed for " + track.title(), error);
+    }
+
+    /**
+     * Applies a status change from a playback thread only while that thread's
+     * handle still owns playback. A superseded track's thread finishes (drain,
+     * error handling) after the next PLAY command was already dispatched;
+     * letting it stamp STOPPED/ERROR over the new track's status makes the
+     * server believe the new track already ended and skip it — cascading
+     * through the whole queue.
+     */
+    private void updateStatusIfOwner(PlaybackHandle handle, AudioBackendStatus newStatus) {
+        if (current.get() == handle) {
+            status = newStatus;
+        }
     }
 
     private Exception tryPlayAsset(PlaybackHandle handle, AudioAsset asset) {
@@ -284,13 +322,13 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 // A PAUSE can arrive while we were still buffering/seeking (before the
                 // line existed). Reflect that in the status so the server does not see
                 // PLAYING for a track that is actually sitting paused and silent.
-                status = handle.paused
+                updateStatusIfOwner(handle, handle.paused
                         ? new AudioBackendStatus(ClientPlaybackState.PAUSED, "Paused")
-                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing"));
                 pump(handle, pcm, line);
                 if (!handle.stopped) {
                     line.drain();
-                    status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+                    updateStatusIfOwner(handle, new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished"));
                 }
                 return null;
             } catch (Exception ex) {
@@ -335,13 +373,13 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 if (!handle.paused) {
                     line.start();
                 }
-                status = handle.paused
+                updateStatusIfOwner(handle, handle.paused
                         ? new AudioBackendStatus(ClientPlaybackState.PAUSED, "Paused")
-                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing"));
                 pump(handle, pcm, line);
                 if (!handle.stopped) {
                     line.drain();
-                    status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+                    updateStatusIfOwner(handle, new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished"));
                 }
                 return null;
             } catch (Exception ex) {
@@ -373,13 +411,13 @@ public final class JavaSoundAudioBackend implements AudioBackend {
                 if (!handle.paused) {
                     line.start();
                 }
-                status = handle.paused
+                updateStatusIfOwner(handle, handle.paused
                         ? new AudioBackendStatus(ClientPlaybackState.PAUSED, "Paused")
-                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing");
+                        : new AudioBackendStatus(ClientPlaybackState.PLAYING, "Playing"));
                 pump(handle, pcm, line);
                 if (!handle.stopped) {
                     line.drain();
-                    status = new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished");
+                    updateStatusIfOwner(handle, new AudioBackendStatus(ClientPlaybackState.STOPPED, "Finished"));
                 }
                 return null;
             } catch (Exception ex) {
@@ -421,15 +459,28 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         if (scheduledStart == null || scheduledStart.equals(Instant.EPOCH)) {
             return;
         }
+        long startNanos = System.nanoTime();
         synchronized (handle) {
             while (!handle.stopped) {
-                long waitMillis = Duration.between(Instant.now(), scheduledStart).toMillis();
+                long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000L;
+                long waitMillis = boundedStartWaitMillis(Instant.now(), scheduledStart, elapsedMillis);
                 if (waitMillis <= 0L) {
                     return;
                 }
                 handle.wait(Math.min(waitMillis, 50L));
             }
         }
+    }
+
+    /**
+     * Remaining wait before a scheduled start, bounded so that a local clock
+     * running behind the server's cannot hold every track hostage for the full
+     * skew. {@code scheduledStart} is server wall-clock time.
+     */
+    static long boundedStartWaitMillis(Instant now, Instant scheduledStart, long elapsedWaitMillis) {
+        long waitMillis = Duration.between(now, scheduledStart).toMillis();
+        long capMillis = MAX_SCHEDULED_START_WAIT.toMillis() - elapsedWaitMillis;
+        return Math.min(waitMillis, capMillis);
     }
 
     static EncodedAudioKind detectAudioKind(InputStream source) throws java.io.IOException {
@@ -1093,6 +1144,7 @@ public final class JavaSoundAudioBackend implements AudioBackend {
     private static final class PlaybackHandle {
         private final String playbackId;
         private final Duration seekOffset;
+        private final Duration timelineOffset;
         private final Instant scheduledStart;
         private volatile Thread thread;
         private volatile SourceDataLine line;
@@ -1101,9 +1153,10 @@ public final class JavaSoundAudioBackend implements AudioBackend {
         private volatile boolean paused;
         private volatile boolean stopped;
 
-        private PlaybackHandle(String playbackId, Duration seekOffset, Instant scheduledStart) {
+        private PlaybackHandle(String playbackId, Duration seekOffset, Duration timelineOffset, Instant scheduledStart) {
             this.playbackId = playbackId;
             this.seekOffset = seekOffset != null ? seekOffset : Duration.ZERO;
+            this.timelineOffset = timelineOffset != null ? timelineOffset : Duration.ZERO;
             this.scheduledStart = scheduledStart == null ? Instant.EPOCH : scheduledStart;
         }
     }

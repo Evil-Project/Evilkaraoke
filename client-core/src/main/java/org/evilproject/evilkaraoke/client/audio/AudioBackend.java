@@ -1,6 +1,8 @@
 package org.evilproject.evilkaraoke.client.audio;
 
 import java.io.InputStream;
+import java.time.Duration;
+import java.util.Optional;
 
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 
@@ -25,6 +27,11 @@ public interface AudioBackend {
 
     /** Applies the local Minecraft sound-slider gain (0..1) without restarting playback. */
     default void setGameVolume(float linearGain) {
+    }
+
+    /** Returns the current position in the complete track timeline when available. */
+    default Optional<Duration> playbackPosition() {
+        return Optional.empty();
     }
 
     AudioBackendStatus status();

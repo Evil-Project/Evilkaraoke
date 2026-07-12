@@ -13,6 +13,7 @@ import java.util.logging.Level;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.model.PlaybackState;
 import org.evilproject.evilkaraoke.common.model.UserAudioTracks;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.evilproject.evilkaraoke.common.security.AudioUrlValidator;
 import org.evilproject.evilkaraoke.common.util.DurationFormatter;
 import org.evilproject.evilkaraoke.server.api.NeurokaraokeApiUnavailableException;
@@ -30,7 +31,7 @@ public final class EvilKaraokeCommandService {
     private static final List<String> ROOT_SUBCOMMANDS = List.of(
             "help", "doctor", "listeners", "reload", "randomsong", "request", "search",
             "setlist", "playlist", "radio", "current", "queue",
-            "audience", "stats", "issue"
+            "audience", "stats", "issue", "lyrics"
     );
 
     private final EvilKaraokeServerCore core;
@@ -57,6 +58,7 @@ public final class EvilKaraokeCommandService {
             case "issue" -> issue(actor);
             case "setlist" -> setlist(actor, args, label);
             case "playlist" -> playlist(actor, args, label);
+            case "lyrics" -> lyrics(actor, args);
             default -> unknown(actor);
         };
     }
@@ -71,6 +73,9 @@ public final class EvilKaraokeCommandService {
         }
         if (args.length == 2 && "request".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("id", "url"), args[1]);
+        }
+        if (args.length == 2 && "lyrics".equalsIgnoreCase(args[0])) {
+            return filterPrefix(List.of("enable", "disable"), args[1]);
         }
         if (args.length == 2 && "randomsong".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("queue", "1"), args[1]);
@@ -328,8 +333,30 @@ public final class EvilKaraokeCommandService {
         actor.sendMessage("/" + label + " queue previous|next - navigate tracks");
         actor.sendMessage("/" + label + " audience <@a|@s|player> - choose who hears playback");
         actor.sendMessage("/" + label + " radio <radio21|swarmfm> - start radio");
+        actor.sendMessage("/" + label + " lyrics [enable|disable] - toggle or set lyric captions on your client");
         actor.sendMessage("/" + label + " stats <me|user|server|top> - stats");
         actor.sendMessage("/" + label + " doctor - verify readiness");
+        return 1;
+    }
+
+    private int lyrics(CommandActor actor, String[] args) {
+        if (args.length > 2) {
+            actor.sendMessage("Usage: /ek lyrics [enable|disable]");
+            return 0;
+        }
+        var action = LyricsDisplayAction.parseCommandArgument(args.length == 2 ? args[1] : null);
+        if (action.isEmpty()) {
+            actor.sendMessage("Usage: /ek lyrics [enable|disable]");
+            return 0;
+        }
+        if (!actor.isPlayer()) {
+            actor.sendMessage("Only players can change lyric captions.");
+            return 0;
+        }
+        if (!core.coordinator().setLyrics(actor.playerId(), action.get())) {
+            actor.sendMessage("You need an updated Evilkaraoke client mod to see lyric captions.");
+            return 0;
+        }
         return 1;
     }
 
@@ -567,8 +594,8 @@ public final class EvilKaraokeCommandService {
                         core.rememberSearchResultSelection(actor.playerId(), page.results());
                     }
                     actor.sendMessage(searchHeaderMessage(searchRequest.query(), searchRequest.page(), label));
-                    for (KaraokeTrack track : page.results()) {
-                        actor.sendMessage(searchResultMessage(track, label));
+                    for (int i = 0; i < page.results().size(); i++) {
+                        actor.sendMessage(searchResultMessage(page.results().get(i), searchRequest.page(), i, label));
                     }
                     if (searchRequest.page() > 1 || page.hasNextPage()) {
                         actor.sendMessage(pageNavigation("/" + label + " search " + searchRequest.query(), searchRequest.page(), searchRequest.page() > 1, page.hasNextPage()));
@@ -874,15 +901,20 @@ public final class EvilKaraokeCommandService {
         if (!canUsePlaybackControl(actor, action)) {
             return deny(actor);
         }
-        switch (action) {
+        boolean applied = switch (action) {
             case "pause" -> core.coordinator().pause();
             case "resume" -> core.coordinator().resume();
             case "next" -> core.coordinator().skip();
             case "previous" -> core.coordinator().previous();
             case "stop" -> core.coordinator().stop();
             default -> {
-                return unknown(actor);
+                unknown(actor);
+                yield false;
             }
+        };
+        if (!applied) {
+            actor.sendMessage(playbackControlUnavailableMessage(action));
+            return refresh ? refreshQueue(actor, label, page) : 1;
         }
         if (refresh) {
             return refreshQueue(actor, label, page);
@@ -894,6 +926,15 @@ public final class EvilKaraokeCommandService {
             default -> "Playback " + action + " sent to listeners.";
         });
         return 1;
+    }
+
+    private static String playbackControlUnavailableMessage(String action) {
+        return switch (action) {
+            case "previous" -> "No previous track is available.";
+            case "next" -> "Nothing is playing and the queue is empty.";
+            case "resume" -> "Playback is not paused.";
+            default -> "Nothing is currently playing.";
+        };
     }
 
     private int audience(CommandActor actor, String[] args) {
@@ -1266,9 +1307,10 @@ public final class EvilKaraokeCommandService {
                 .build();
     }
 
-    private static CommandMessage searchResultMessage(KaraokeTrack track, String label) {
+    private static CommandMessage searchResultMessage(KaraokeTrack track, int page, int rowIndex, String label) {
+        int number = ((Math.max(1, page) - 1) * CHAT_PAGE_SIZE) + rowIndex + 1;
         CommandMessage.Builder message = CommandMessage.builder()
-                .append("- " + songLine(track) + " ");
+                .append(number + ". " + songLine(track) + " ");
         if (safeCommandToken(track.id())) {
             message.action("[Request]", "/" + label + " request id " + track.id(), "Request " + track.title());
         } else {

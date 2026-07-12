@@ -237,6 +237,7 @@ public final class EvilKaraokeNeoForge {
         }
         if (lower.startsWith("evilkaraoke ")
                 || lower.startsWith("queue ")
+                || lower.startsWith("random songs")
                 || lower.startsWith("results for")
                 || lower.startsWith("setlists")
                 || lower.startsWith("public playlists")

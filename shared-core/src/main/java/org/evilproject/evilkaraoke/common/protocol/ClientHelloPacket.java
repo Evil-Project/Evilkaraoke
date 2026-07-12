@@ -11,7 +11,8 @@ public record ClientHelloPacket(
         List<String> supportedCodecs,
         boolean supportsPositionalAudio,
         boolean supportsPitch,
-        boolean supportsRadioStreams
+        boolean supportsRadioStreams,
+        boolean supportsLyrics
 ) implements ProtocolPacket {
     public ClientHelloPacket {
         Objects.requireNonNull(modVersion, "modVersion");

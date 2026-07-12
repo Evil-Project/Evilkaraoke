@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -34,6 +35,7 @@ import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.evilproject.evilkaraoke.server.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.server.api.NeurokaraokeEndpoints;
@@ -92,6 +94,45 @@ class PlaybackCoordinatorTest {
         assertEquals("song", coordinator.snapshot().current().track().id());
         assertEquals(100L, platform.onlyScheduledTask().delayTicks(),
                 "active clients should keep playback alive past the metadata duration");
+    }
+
+    @Test
+    void coalescesDeferredPlaybackStartsForBackToBackRequests() {
+        platform.deferRunNow();
+
+        coordinator.request(track("first", Duration.ofSeconds(60)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+
+        assertEquals(1, platform.pendingRunNowTaskCount());
+        platform.runPendingNowTasks();
+
+        assertEquals("first", coordinator.snapshot().current().track().id());
+        assertEquals(List.of("second"), coordinator.queue().stream()
+                .map(queued -> queued.track().id()).toList());
+        assertEquals("first", platform.lastPacket(AudioCommandType.PLAY).track().id());
+    }
+
+    @Test
+    void sendsRequestedLyricsDisplayActionToCompatibleClient() {
+        assertTrue(coordinator.setLyrics(player.id(), LyricsDisplayAction.DISABLE));
+
+        AudioCommandPacket disable = platform.lastPacket(AudioCommandType.LYRICS);
+        assertNotNull(disable);
+        assertEquals(LyricsDisplayAction.DISABLE.reason(), disable.reason());
+        assertEquals(1, platform.packetCount(player, AudioCommandPacket.class));
+
+        assertTrue(coordinator.toggleLyrics(player.id()));
+        assertEquals(LyricsDisplayAction.TOGGLE.reason(), platform.lastPacket(AudioCommandType.LYRICS).reason());
+        assertEquals(2, platform.packetCount(player, AudioCommandPacket.class));
+    }
+
+    @Test
+    void rejectsLyricsActionsForClientsWithoutLyricsCapability() {
+        clientRegistry.unregister(player.id());
+        registerClient(player, List.of("opus", "stream"), false);
+
+        assertFalse(coordinator.setLyrics(player.id(), LyricsDisplayAction.ENABLE));
+        assertEquals(0, platform.packetCount(player, AudioCommandPacket.class));
     }
 
     @Test
@@ -181,12 +222,70 @@ class PlaybackCoordinatorTest {
 
         coordinator.handleClientStatus(
                 player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.PLAYING, Duration.ZERO, ""));
+        coordinator.handleClientStatus(
+                player.id(),
                 new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.STOPPED, Duration.ZERO, "Finished"));
 
         AudioCommandPacket secondPlay = platform.lastPacket(AudioCommandType.PLAY);
         assertNotNull(secondPlay);
         assertEquals("second", secondPlay.track().id());
         assertFalse(firstPlay.playbackId().equals(secondPlay.playbackId()));
+    }
+
+    @Test
+    void stoppedStatusAfterBufferingOnlyStillAdvancesQueue() {
+        coordinator.request(track("first", null), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket firstPlay = platform.lastPacket(AudioCommandType.PLAY);
+
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.BUFFERING, Duration.ZERO, ""));
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.STOPPED, Duration.ZERO, "Server stream ended"));
+
+        assertEquals("second", platform.lastPacket(AudioCommandType.PLAY).track().id());
+    }
+
+    @Test
+    void firstReportStoppedWithoutActivityDoesNotAdvanceQueue() {
+        coordinator.request(track("first", Duration.ofSeconds(60)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket firstPlay = platform.lastPacket(AudioCommandType.PLAY);
+
+        // A stale STOPPED echo from the previous track finishing on the client
+        // must not be read as "the fresh track already ended".
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.STOPPED, Duration.ZERO, "Finished"));
+
+        assertEquals("first", coordinator.snapshot().current().track().id());
+        assertEquals(firstPlay.playbackId(), platform.lastPacket(AudioCommandType.PLAY).playbackId());
+
+        // Once the client actually participates, its finish advances as usual.
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.PLAYING, Duration.ZERO, ""));
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.STOPPED, Duration.ZERO, "Finished"));
+
+        assertEquals("second", platform.lastPacket(AudioCommandType.PLAY).track().id());
+    }
+
+    @Test
+    void firstReportErrorStillAdvancesPastBrokenTrack() {
+        coordinator.request(track("first", Duration.ofSeconds(60)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket firstPlay = platform.lastPacket(AudioCommandType.PLAY);
+
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.ERROR, Duration.ZERO, "Decode failed"));
+
+        assertEquals("second", platform.lastPacket(AudioCommandType.PLAY).track().id());
     }
 
     @Test
@@ -290,6 +389,44 @@ class PlaybackCoordinatorTest {
         assertEquals(200L, retry.delayTicks());
         assertEquals(Duration.ZERO, coordinator.snapshot().offset(),
                 "loading clients should not start the server-side playback counter");
+    }
+
+    @Test
+    void fallbackEventuallyUsesMetadataTimerForSilentClient() {
+        coordinator.request(track("song", Duration.ofSeconds(5)), player).join();
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            FakePlatform.ScheduledTask fallback = platform.onlyScheduledTask();
+            assertEquals(200L, fallback.delayTicks());
+            platform.runScheduled(fallback.id());
+        }
+
+        FakePlatform.ScheduledTask autoAdvance = platform.onlyScheduledTask();
+        assertTrue(autoAdvance.delayTicks() <= 300L && autoAdvance.delayTicks() >= 298L);
+    }
+
+    @Test
+    void fallbackStartsTimerWhenEveryReportingClientIsAlreadyTerminal() {
+        coordinator.request(track("first", Duration.ofSeconds(5)), player).join();
+        coordinator.request(track("second", Duration.ofSeconds(60)), player).join();
+        AudioCommandPacket firstPlay = platform.lastPacket(AudioCommandType.PLAY);
+
+        // The track ended between two status ticks, so STOPPED is the client's
+        // only report. That alone must not advance, but it also must not leave
+        // the start fallback rescheduling forever.
+        coordinator.handleClientStatus(
+                player.id(),
+                new ClientStatusPacket(firstPlay.playbackId(), ClientPlaybackState.STOPPED, Duration.ZERO, "Finished"));
+        assertEquals("first", coordinator.snapshot().current().track().id());
+
+        FakePlatform.ScheduledTask fallback = platform.onlyScheduledTask();
+        platform.runScheduled(fallback.id());
+
+        FakePlatform.ScheduledTask autoAdvance = platform.onlyScheduledTask();
+        assertTrue(autoAdvance.delayTicks() <= 300L && autoAdvance.delayTicks() >= 298L,
+                "the metadata timer should take over when no client can still confirm a start");
+        platform.runScheduled(autoAdvance.id());
+        assertEquals("second", coordinator.snapshot().current().track().id());
     }
 
     @Test
@@ -573,6 +710,10 @@ class PlaybackCoordinatorTest {
     }
 
     private void registerClient(KaraokePlayer player, List<String> supportedCodecs) {
+        registerClient(player, supportedCodecs, true);
+    }
+
+    private void registerClient(KaraokePlayer player, List<String> supportedCodecs, boolean supportsLyrics) {
         clientRegistry.register(player.id(), new ClientHelloPacket(
                 1,
                 "test",
@@ -581,7 +722,8 @@ class PlaybackCoordinatorTest {
                 supportedCodecs,
                 false,
                 true,
-                true));
+                true,
+                supportsLyrics));
     }
 
     private static KaraokeTrack track(String id, Duration duration) {
@@ -610,10 +752,12 @@ class PlaybackCoordinatorTest {
         private final List<KaraokePlayer> players = new ArrayList<>();
         private final List<SentPacket> sentPackets = new ArrayList<>();
         private final Map<Integer, ScheduledTask> scheduledTasks = new LinkedHashMap<>();
+        private final ArrayDeque<Runnable> pendingRunNowTasks = new ArrayDeque<>();
         private final Map<UUID, Integer> pings = new LinkedHashMap<>();
         private final List<Integer> cancelledTaskIds = new ArrayList<>();
         private final List<LogEntry> logs = new ArrayList<>();
         private int nextTaskId = 1;
+        private boolean deferRunNow;
 
         private FakePlatform(KaraokePlayer player) {
             players.add(player);
@@ -633,7 +777,25 @@ class PlaybackCoordinatorTest {
 
         @Override
         public void runNow(Runnable task) {
-            task.run();
+            if (deferRunNow) {
+                pendingRunNowTasks.addLast(task);
+            } else {
+                task.run();
+            }
+        }
+
+        private void deferRunNow() {
+            deferRunNow = true;
+        }
+
+        private int pendingRunNowTaskCount() {
+            return pendingRunNowTasks.size();
+        }
+
+        private void runPendingNowTasks() {
+            while (!pendingRunNowTasks.isEmpty()) {
+                pendingRunNowTasks.removeFirst().run();
+            }
         }
 
         @Override

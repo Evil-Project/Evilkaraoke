@@ -14,8 +14,10 @@ import java.io.PipedOutputStream;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -136,6 +138,58 @@ class JavaSoundAudioBackendTest {
         waitUntil(() -> backend.status().state() == ClientPlaybackState.ERROR, Duration.ofSeconds(3));
         assertEquals(ClientPlaybackState.ERROR, backend.status().state());
         assertTrue(line.closed, "audio line should still close after a stream read failure");
+    }
+
+    @Test
+    void finishedPlaybackDoesNotClobberStatusOfNextPlayback() throws Exception {
+        CountDownLatch drainEntered = new CountDownLatch(1);
+        CountDownLatch releaseDrain = new CountDownLatch(1);
+        RecordingLine firstLine = new RecordingLine();
+        firstLine.drainHook = () -> {
+            drainEntered.countDown();
+            awaitUninterruptibly(releaseDrain);
+        };
+        RecordingLine secondLine = new RecordingLine();
+        List<SourceDataLine> lines = List.of(firstLine, secondLine);
+        AtomicInteger nextLine = new AtomicInteger();
+        JavaSoundAudioBackend backend = new JavaSoundAudioBackend(uri -> uri, format -> lines.get(nextLine.getAndIncrement()));
+        AudioAsset asset = new AudioAsset("https://example.invalid/song.wav", AudioFormat.UNKNOWN);
+
+        backend.playPcmStream(
+                playPacket("first-track", asset, Duration.ofSeconds(1)),
+                new ByteArrayInputStream(pcm16(1, -1)),
+                44_100.0f, 1, 16);
+        assertTrue(drainEntered.await(2, TimeUnit.SECONDS), "first track should finish pumping and reach drain");
+
+        BlockingInputStream secondSource = new BlockingInputStream();
+        backend.playPcmStream(playPacket("second-track", asset, Duration.ofSeconds(1)), secondSource, 44_100.0f, 1, 16);
+        releaseDrain.countDown();
+
+        waitUntil(() -> !hasThreadNamed("evilkaraoke-audio-first-track"), Duration.ofSeconds(2));
+        assertEquals(ClientPlaybackState.BUFFERING, backend.status().state(),
+                "a superseded track's finish must not overwrite the next track's status");
+        backend.stop(null);
+    }
+
+    @Test
+    void scheduledStartWaitIsBoundedAgainstServerClockSkew() {
+        Instant now = Instant.now();
+
+        assertEquals(2_000L, JavaSoundAudioBackend.boundedStartWaitMillis(now, now.plusSeconds(2), 0L));
+        assertEquals(10_000L, JavaSoundAudioBackend.boundedStartWaitMillis(now, now.plusSeconds(120), 0L));
+        assertTrue(JavaSoundAudioBackend.boundedStartWaitMillis(now, now.plusSeconds(120), 10_000L) <= 0L,
+                "waiting must end once the skew bound is spent");
+        assertTrue(JavaSoundAudioBackend.boundedStartWaitMillis(now, now.minusSeconds(30), 0L) <= 0L,
+                "past start times must not wait at all");
+    }
+
+    @Test
+    void timelinePositionIncludesLateJoinOffset() {
+        assertEquals(
+                Duration.ofSeconds(61).plusMillis(250),
+                JavaSoundAudioBackend.timelinePosition(Duration.ofSeconds(60), 1_250_000L));
+        assertEquals(Duration.ofSeconds(60),
+                JavaSoundAudioBackend.timelinePosition(Duration.ofSeconds(60), -1L));
     }
 
     @Test
@@ -501,6 +555,28 @@ class JavaSoundAudioBackendTest {
                 .anyMatch(thread -> thread.isAlive() && threadName.equals(thread.getName()));
     }
 
+    /**
+     * Waits out a latch while surviving the interrupt that stopping a playback
+     * handle sends to its thread, so the test controls exactly when the stale
+     * thread resumes. Bounded so a broken test cannot hang the suite.
+     */
+    private static void awaitUninterruptibly(CountDownLatch latch) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        boolean interrupted = false;
+        while (System.nanoTime() < deadline) {
+            try {
+                if (latch.await(20, TimeUnit.MILLISECONDS)) {
+                    break;
+                }
+            } catch (InterruptedException ex) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @FunctionalInterface
     private interface BooleanSupplier {
         boolean getAsBoolean();
@@ -514,6 +590,7 @@ class JavaSoundAudioBackendTest {
         private boolean started;
         private boolean drained;
         private boolean closed;
+        private Runnable drainHook;
 
         @Override
         public void open(javax.sound.sampled.AudioFormat format, int bufferSize) {
@@ -536,6 +613,9 @@ class JavaSoundAudioBackendTest {
         @Override
         public void drain() {
             drained = true;
+            if (drainHook != null) {
+                drainHook.run();
+            }
         }
 
         @Override
@@ -645,6 +725,44 @@ class JavaSoundAudioBackendTest {
 
         byte[] writtenBytes() {
             return written.toByteArray();
+        }
+    }
+
+    /** Blocks every read until closed, keeping a playback pinned in BUFFERING. */
+    private static final class BlockingInputStream extends InputStream {
+        private final Object lock = new Object();
+        private boolean closed;
+
+        @Override
+        public int read() throws java.io.IOException {
+            synchronized (lock) {
+                while (!closed) {
+                    try {
+                        lock.wait(50L);
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        throw new java.io.IOException("Interrupted while blocking", ex);
+                    }
+                }
+                return -1;
+            }
+        }
+
+        @Override
+        public int read(byte[] buffer, int off, int len) throws java.io.IOException {
+            java.util.Objects.checkFromIndexSize(off, len, buffer.length);
+            if (len == 0) {
+                return 0;
+            }
+            return read();
+        }
+
+        @Override
+        public void close() {
+            synchronized (lock) {
+                closed = true;
+                lock.notifyAll();
+            }
         }
     }
 

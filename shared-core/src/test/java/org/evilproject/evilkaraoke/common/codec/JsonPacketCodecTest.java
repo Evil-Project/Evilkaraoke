@@ -2,6 +2,7 @@ package org.evilproject.evilkaraoke.common.codec;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -18,6 +19,7 @@ import org.evilproject.evilkaraoke.common.protocol.AudioCommandPacket;
 import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
 import org.evilproject.evilkaraoke.common.protocol.AudioDeliveryMode;
 import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
+import org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
@@ -119,6 +121,25 @@ class JsonPacketCodecTest {
         assertEquals(2_048L, actual.streamBytesRead());
         assertEquals(2_048, actual.streamQueuedBytes());
         assertEquals(1L, actual.streamMissingChunks());
+    }
+
+    @Test
+    void legacyHelloWithoutLyricsCapabilityDefaultsToUnsupported() {
+        ProtocolPacket decoded = codec.decode("""
+                {"version":1,"type":"hello","payload":{
+                  "protocolVersion":1,
+                  "modVersion":"1.0.0",
+                  "minecraftVersion":"26.2",
+                  "loader":"fabric",
+                  "supportedCodecs":["opus"],
+                  "supportsPositionalAudio":true,
+                  "supportsPitch":false,
+                  "supportsRadioStreams":true
+                }}
+                """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        ClientHelloPacket hello = assertInstanceOf(ClientHelloPacket.class, decoded);
+        assertFalse(hello.supportsLyrics());
     }
 
     @Test

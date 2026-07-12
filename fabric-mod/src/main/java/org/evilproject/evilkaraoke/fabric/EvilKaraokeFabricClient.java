@@ -8,10 +8,10 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.sounds.SoundSource;
+import org.evilproject.evilkaraoke.client.config.EvilKaraokeClientConfig;
 import org.evilproject.evilkaraoke.client.net.ClientAudioController;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.model.SoundCategory;
@@ -20,8 +20,8 @@ import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
 /**
  * Fabric client entrypoint. Registers Evilkaraoke's custom payload channels and
  * forwards raw bytes to the loader-neutral {@link ClientAudioController}. The mod
- * only plays audio: it never inspects queue or command state, matching the
- * server-authoritative design and requirement that clients are audio-only.
+ * handles local audio and timed lyric captions without inspecting queue or
+ * command state, preserving the server-authoritative design.
  */
 public final class EvilKaraokeFabricClient implements ClientModInitializer {
     private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
@@ -33,6 +33,8 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
     private final CustomPacketPayload.Type<EvilKaraokePayload> statusType = EvilKaraokePayload.type(EvilKaraokeProtocol.STATUS_CHANNEL);
 
     private ClientAudioController controller;
+    private EvilKaraokeClientConfig clientConfig;
+    private KaraokeNowPlayingToast musicToast;
     private int tickCounter = 0;
     private int helloRetryTicks = 0;
     private boolean backgroundAudioMuted = false;
@@ -47,10 +49,18 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
                 .getModContainer("minecraft")
                 .map(container -> container.getMetadata().getVersion().getFriendlyString())
                 .orElse("unknown");
+        clientConfig = EvilKaraokeClientConfig.load(FabricLoader.getInstance().getConfigDir(), LOGGER);
         controller = new ClientAudioController(LOGGER, modVersion, minecraftVersion, "fabric");
+        controller.setLyricsEnabled(clientConfig.lyricsEnabled());
 
-        // Show the vanilla music toast whenever a karaoke track starts playing.
-        controller.setOnPlay(this::showMusicToast);
+        // Timed lyric lines use the same HUD area as `/title ... actionbar`.
+        controller.setOnPlay(track -> {
+            KaraokeLyricActionBar.hide();
+            showMusicToast(track);
+        });
+        controller.setOnLyric(KaraokeLyricActionBar::showLyric);
+        controller.setOnLyricClear(KaraokeLyricActionBar::hide);
+        controller.setOnLyricsToggled(this::onLyricsToggled);
 
         ClientPlayNetworking.registerGlobalReceiver(audioType, (payload, context) ->
                 context.client().execute(() -> controller.handleAudioPayload(payload.data())));
@@ -66,11 +76,13 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             helloRetryTicks = 0;
             controller.stopAll();
+            KaraokeLyricActionBar.hide();
+            hideMusicToast(client);
             restoreMinecraftBackgroundAudio(client);
             LOGGER.info("Evilkaraoke stopped playback on server disconnect.");
         });
 
-        LOGGER.info("Evilkaraoke Fabric client initialized (audio-only).");
+        LOGGER.info("Evilkaraoke Fabric client initialized (audio and timed captions).");
     }
 
     private void updateMinecraftVolume(Minecraft client) {
@@ -78,6 +90,8 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
             controller.setGameVolume(client.options.getFinalSoundSourceVolume(soundSource(controller.soundCategory())));
             updateMinecraftBackgroundAudioMute(client);
         }
+        controller.tickLyrics();
+        KaraokeLyricActionBar.tick(controller.isPlaybackSessionActive());
 
         sendPendingHello();
 
@@ -86,6 +100,19 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
         if (tickCounter >= STATUS_REPORT_INTERVAL_TICKS) {
             tickCounter = 0;
             sendStatusUpdate();
+        }
+    }
+
+    private void onLyricsToggled(boolean enabled) {
+        clientConfig.setLyricsEnabled(enabled);
+        if (!enabled) {
+            KaraokeLyricActionBar.hide();
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc != null && mc.player != null) {
+            mc.player.sendSystemMessage(Component.literal(enabled
+                    ? "Evilkaraoke lyrics enabled."
+                    : "Evilkaraoke lyrics disabled."));
         }
     }
 
@@ -147,21 +174,23 @@ public final class EvilKaraokeFabricClient implements ClientModInitializer {
         backgroundAudioMuted = false;
     }
 
-    /**
-     * Surfaces the playing track as the vanilla music toast so players see the
-     * same "now playing" notification they get from jukeboxes.
-     */
     private void showMusicToast(KaraokeTrack track) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null) {
             return;
         }
-        Component title = Component.literal(track.title());
-        Component artist = Component.literal(track.artist());
-        mc.execute(() -> SystemToast.add(
-                mc.gui.toastManager(),
-                SystemToast.SystemToastId.PERIODIC_NOTIFICATION,
-                title,
-                artist));
+        hideMusicToast(minecraft);
+        if (track == null) {
+            return;
+        }
+        musicToast = new KaraokeNowPlayingToast(Component.literal(track.artist() + " - " + track.title()));
+        minecraft.gui.toastManager().addToast(musicToast);
+    }
+
+    private void hideMusicToast(Minecraft minecraft) {
+        if (musicToast != null) {
+            musicToast.hide();
+            musicToast = null;
+        }
     }
 }

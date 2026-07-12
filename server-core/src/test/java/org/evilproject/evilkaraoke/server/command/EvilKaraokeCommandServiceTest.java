@@ -43,6 +43,13 @@ class EvilKaraokeCommandServiceTest {
     }
 
     @Test
+    void suggestsLyricsActions() {
+        assertEquals(List.of("enable", "disable"), EvilKaraokeCommandService.suggest(new String[] {"lyrics", ""}));
+        assertEquals(List.of("enable"), EvilKaraokeCommandService.suggest(new String[] {"lyrics", "e"}));
+        assertEquals(List.of("disable"), EvilKaraokeCommandService.suggest(new String[] {"lyrics", "D"}));
+    }
+
+    @Test
     void suggestsRandomSongQueueActions() {
         assertEquals(List.of("queue", "1"), EvilKaraokeCommandService.suggest(new String[] {"randomsong", ""}));
         assertEquals(List.of("all", "1", "2", "3", "4", "5"), EvilKaraokeCommandService.suggest(new String[] {"randomsong", "queue", ""}));
@@ -123,6 +130,46 @@ class EvilKaraokeCommandServiceTest {
             assertEquals(List.of("all", "1", "2"), service.suggest(actor, new String[] {"queue", "cancel", ""}));
             assertEquals(List.of("Alex"), service.suggest(actor, new String[] {"audience", "a"}));
             assertEquals(List.of("Steve"), service.suggest(actor, new String[] {"stats", "user", "s"}));
+        } finally {
+            core.disable();
+        }
+    }
+
+    @Test
+    void lyricsRequiresACompatibleClientAndValidAction() {
+        KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
+        FakePlatform platform = new FakePlatform(List.of(steve));
+        EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
+        core.enable();
+        try {
+            EvilKaraokeCommandService service = new EvilKaraokeCommandService(core);
+            TestActor actor = new TestActor(steve, List.of());
+
+            service.execute(actor, "ek", new String[] {"lyrics"});
+            assertEquals(List.of("You need an updated Evilkaraoke client mod to see lyric captions."), actor.messages());
+
+            core.clientRegistry().register(steve.id(), new org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket(
+                    org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol.VERSION,
+                    "test", "26.2", "test", List.of("opus"), false, true, true, false));
+            actor.messages().clear();
+            assertEquals(0, service.execute(actor, "ek", new String[] {"lyrics", "enable"}));
+            assertEquals(List.of("You need an updated Evilkaraoke client mod to see lyric captions."), actor.messages());
+
+            core.clientRegistry().register(steve.id(), new org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket(
+                    org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol.VERSION,
+                    "test", "26.2", "test", List.of("opus"), false, true, true, true));
+            actor.messages().clear();
+            assertEquals(1, service.execute(actor, "ek", new String[] {"lyrics"}));
+            assertEquals(List.of(), actor.messages());
+
+            assertEquals(1, service.execute(actor, "ek", new String[] {"lyrics", "ENABLE"}));
+            assertEquals(1, service.execute(actor, "ek", new String[] {"lyrics", "disable"}));
+
+            assertEquals(0, service.execute(actor, "ek", new String[] {"lyrics", "invalid"}));
+            assertEquals(0, service.execute(actor, "ek", new String[] {"lyrics", "enable", "extra"}));
+            assertEquals(List.of(
+                    "Usage: /ek lyrics [enable|disable]",
+                    "Usage: /ek lyrics [enable|disable]"), actor.messages());
         } finally {
             core.disable();
         }
@@ -251,7 +298,7 @@ class EvilKaraokeCommandServiceTest {
     }
 
     @Test
-    void queueNavigationCommandsControlPlayback() {
+    void emptyQueueNavigationCommandsExplainWhyNothingChanged() {
         KaraokePlayer steve = new KaraokePlayer(UUID.randomUUID(), "Steve");
         FakePlatform platform = new FakePlatform(List.of(steve));
         EvilKaraokeServerCore core = new EvilKaraokeServerCore(Logger.getLogger("test"), tempDir, platform);
@@ -263,8 +310,8 @@ class EvilKaraokeCommandServiceTest {
             service.execute(actor, "ek", new String[] {"queue", "next"});
             service.execute(actor, "ek", new String[] {"queue", "previous"});
 
-            assertTrue(actor.messages().contains("Skipping to next track."));
-            assertTrue(actor.messages().contains("Going back to previous track."));
+            assertTrue(actor.messages().contains("Nothing is playing and the queue is empty."));
+            assertTrue(actor.messages().contains("No previous track is available."));
         } finally {
             core.disable();
         }
@@ -570,8 +617,8 @@ class EvilKaraokeCommandServiceTest {
                 waitUntil(() -> actor.messages().size() >= 3);
 
                 assertEquals("Results for \"hello\" (page 1): [Queue All]", actor.messages().get(0));
-                assertEquals("- First Search - Artist One (covered by Neuro) [Request]", actor.messages().get(1));
-                assertEquals("- Second Search - Artist Two (covered by Evil) [Request]", actor.messages().get(2));
+                assertEquals("1. First Search - Artist One (covered by Neuro) [Request]", actor.messages().get(1));
+                assertEquals("2. Second Search - Artist Two (covered by Evil) [Request]", actor.messages().get(2));
 
                 service.execute(actor, "ek", new String[] {"search", "queue-all"});
 

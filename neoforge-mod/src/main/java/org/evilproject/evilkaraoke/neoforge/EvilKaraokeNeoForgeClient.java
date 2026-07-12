@@ -4,17 +4,19 @@ import java.util.logging.Logger;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
 import net.minecraft.sounds.SoundSource;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
+import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.client.network.event.RegisterClientPayloadHandlersEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
+import net.neoforged.neoforge.network.registration.NetworkRegistry;
+import org.evilproject.evilkaraoke.client.config.EvilKaraokeClientConfig;
 import org.evilproject.evilkaraoke.client.net.ClientAudioController;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.model.SoundCategory;
@@ -22,8 +24,8 @@ import org.evilproject.evilkaraoke.common.protocol.EvilKaraokeProtocol;
 
 /**
  * NeoForge client entrypoint. Registers Evilkaraoke's payload channels and hands
- * bytes to the shared {@link ClientAudioController}. Audio playback only; all
- * command/queue logic stays on the server.
+ * bytes to the shared {@link ClientAudioController}. Audio playback and timed
+ * captions stay client-side; all command/queue logic stays on the server.
  */
 public final class EvilKaraokeNeoForgeClient {
     private static final Logger LOGGER = Logger.getLogger("Evilkaraoke");
@@ -35,6 +37,8 @@ public final class EvilKaraokeNeoForgeClient {
     private final EvilKaraokePayload.Type<EvilKaraokePayload> statusType;
 
     private ClientAudioController controller;
+    private EvilKaraokeClientConfig clientConfig;
+    private KaraokeNowPlayingToast musicToast;
     private int tickCounter = 0;
     private int helloRetryTicks = 0;
     private boolean backgroundAudioMuted = false;
@@ -62,12 +66,20 @@ public final class EvilKaraokeNeoForgeClient {
 
         String minecraftVersion = SharedConstants.getCurrentVersion().name();
         String modVersion = container.getModInfo().getVersion().toString();
+        clientConfig = EvilKaraokeClientConfig.load(FMLPaths.CONFIGDIR.get(), LOGGER);
         controller = new ClientAudioController(LOGGER, modVersion, minecraftVersion, "neoforge");
+        controller.setLyricsEnabled(clientConfig.lyricsEnabled());
 
-        // Show the vanilla music toast whenever a karaoke track starts playing.
-        controller.setOnPlay(this::showMusicToast);
+        // Timed lyric lines use the same HUD area as `/title ... actionbar`.
+        controller.setOnPlay(track -> {
+            KaraokeLyricActionBar.hide();
+            showMusicToast(track);
+        });
+        controller.setOnLyric(KaraokeLyricActionBar::showLyric);
+        controller.setOnLyricClear(KaraokeLyricActionBar::hide);
+        controller.setOnLyricsToggled(this::onLyricsToggled);
 
-        LOGGER.info("Evilkaraoke NeoForge client constructed (audio-only).");
+        LOGGER.info("Evilkaraoke NeoForge client constructed (audio and timed captions).");
     }
 
     private void registerClientPayloads(RegisterClientPayloadHandlersEvent event) {
@@ -87,8 +99,23 @@ public final class EvilKaraokeNeoForgeClient {
         // play session when the player disconnects or quits to the main menu.
         helloRetryTicks = 0;
         controller.stopAll();
+        KaraokeLyricActionBar.hide();
+        hideMusicToast(Minecraft.getInstance());
         restoreMinecraftBackgroundAudio(Minecraft.getInstance());
         LOGGER.info("Evilkaraoke stopped playback on server disconnect.");
+    }
+
+    private void onLyricsToggled(boolean enabled) {
+        clientConfig.setLyricsEnabled(enabled);
+        if (!enabled) {
+            KaraokeLyricActionBar.hide();
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc != null && mc.player != null) {
+            mc.player.sendSystemMessage(Component.literal(enabled
+                    ? "Evilkaraoke lyrics enabled."
+                    : "Evilkaraoke lyrics disabled."));
+        }
     }
 
     private void onClientTick(ClientTickEvent.Post event) {
@@ -97,6 +124,8 @@ public final class EvilKaraokeNeoForgeClient {
             controller.setGameVolume(mc.options.getFinalSoundSourceVolume(soundSource(controller.soundCategory())));
             updateMinecraftBackgroundAudioMute(mc);
         }
+        controller.tickLyrics();
+        KaraokeLyricActionBar.tick(controller.isPlaybackSessionActive());
 
         sendPendingHello();
 
@@ -113,20 +142,23 @@ public final class EvilKaraokeNeoForgeClient {
             return;
         }
         helloRetryTicks--;
-        if (Minecraft.getInstance().getConnection() == null) {
+        var connection = Minecraft.getInstance().getConnection();
+        if (connection == null || !NetworkRegistry.hasChannel(connection, helloType.id())) {
             return;
         }
         EvilKaraokePayload payload = new EvilKaraokePayload(helloType, controller.helloPayload());
-        Minecraft.getInstance().getConnection().send(new ServerboundCustomPayloadPacket(payload));
+        connection.send(new ServerboundCustomPayloadPacket(payload));
         helloRetryTicks = 0;
         LOGGER.info("Sent Evilkaraoke hello handshake to server.");
     }
 
     private void sendStatusUpdate() {
-        if (Minecraft.getInstance().getConnection() != null) {
-            EvilKaraokePayload payload = new EvilKaraokePayload(statusType, controller.statusPayload());
-            Minecraft.getInstance().getConnection().send(new ServerboundCustomPayloadPacket(payload));
+        var connection = Minecraft.getInstance().getConnection();
+        if (connection == null || !NetworkRegistry.hasChannel(connection, statusType.id())) {
+            return;
         }
+        EvilKaraokePayload payload = new EvilKaraokePayload(statusType, controller.statusPayload());
+        connection.send(new ServerboundCustomPayloadPacket(payload));
     }
 
     private static SoundSource soundSource(SoundCategory category) {
@@ -168,21 +200,24 @@ public final class EvilKaraokeNeoForgeClient {
         backgroundAudioMuted = false;
     }
 
-    /**
-     * Surfaces the playing track as the vanilla music toast so players see the
-     * same "now playing" notification they get from jukeboxes.
-     */
     private void showMusicToast(KaraokeTrack track) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null) {
             return;
         }
-        Component title = Component.literal(track.title());
-        Component artist = Component.literal(track.artist());
-        mc.execute(() -> SystemToast.add(
-                mc.gui.toastManager(),
-                SystemToast.SystemToastId.PERIODIC_NOTIFICATION,
-                title,
-                artist));
+        hideMusicToast(minecraft);
+        if (track == null) {
+            return;
+        }
+        musicToast = new KaraokeNowPlayingToast(Component.literal(track.artist() + " - " + track.title()));
+        minecraft.gui.toastManager().addToast(musicToast);
     }
+
+    private void hideMusicToast(Minecraft minecraft) {
+        if (musicToast != null) {
+            musicToast.hide();
+            musicToast = null;
+        }
+    }
+
 }

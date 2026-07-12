@@ -79,6 +79,7 @@ public final class EvilKaraokePlugin extends JavaPlugin {
         EvilKaraokeMessageListener listener = new EvilKaraokeMessageListener(this, clientRegistry, packetCodec, coordinator, this::isPacketDebugLoggingEnabled);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilKaraokeProtocol.HELLO_CHANNEL, listener);
         getServer().getMessenger().registerIncomingPluginChannel(this, EvilKaraokeProtocol.STATUS_CHANNEL, listener);
+        getServer().getPluginManager().registerEvents(listener, this);
     }
 
     private boolean isPacketDebugLoggingEnabled() {

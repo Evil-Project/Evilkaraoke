@@ -33,6 +33,10 @@ public final class ClientRegistry {
         return session(playerId).map(ClientRegistry::supportsServerStream).orElse(false);
     }
 
+    public boolean supportsLyrics(UUID playerId) {
+        return session(playerId).map(ClientRegistry::supportsLyrics).orElse(false);
+    }
+
     public int compatibleClientCount() {
         return (int) sessions.values().stream().filter(ClientRegistry::isCompatible).count();
     }
@@ -49,5 +53,9 @@ public final class ClientRegistry {
         return isCompatible(session) && session.hello().supportedCodecs().stream()
                 .map(codec -> codec.toLowerCase(Locale.ROOT))
                 .anyMatch("stream"::equals);
+    }
+
+    private static boolean supportsLyrics(ClientSession session) {
+        return isCompatible(session) && session.hello().supportsLyrics();
     }
 }

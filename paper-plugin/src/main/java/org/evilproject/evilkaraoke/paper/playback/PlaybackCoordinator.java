@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -33,6 +34,7 @@ import org.evilproject.evilkaraoke.common.protocol.AudioDeliveryMode;
 import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeClient;
 import org.evilproject.evilkaraoke.paper.config.EvilKaraokeConfig;
@@ -43,6 +45,7 @@ import org.evilproject.evilkaraoke.paper.queue.KaraokeSession;
 public final class PlaybackCoordinator {
     private static final long BUFFER_TIME_SECONDS = 10L; // Extra time to account for client buffering
     private static final long CLIENT_START_TIMEOUT_SECONDS = 10L;
+    private static final int MAX_CLIENT_START_WAIT_ATTEMPTS = 3;
     private static final long CLIENT_STATUS_STALE_SECONDS = 15L;
     private static final long CLIENT_WATCHDOG_POLL_SECONDS = 5L;
     // Shared start instant for all stream clients. The relay grants an immediate
@@ -64,6 +67,7 @@ public final class PlaybackCoordinator {
     private NeurokaraokeClient neurokaraokeClient;
     private EvilKaraokeConfig config;
     private int autoAdvanceTask = -1;
+    private final AtomicBoolean playbackStartQueued = new AtomicBoolean();
 
     private TargetMode audienceMode = TargetMode.ALL;
     private UUID audiencePlayer;
@@ -82,6 +86,7 @@ public final class PlaybackCoordinator {
     private KaraokeTrack currentStreamTrack;
     private boolean timerStarted = false;
     private boolean clientDrivenPlayback = false;
+    private int clientStartWaitAttempts = 0;
 
     public PlaybackCoordinator(Plugin plugin, ClientRegistry clientRegistry, PlaybackMessenger messenger, NeurokaraokeClient neurokaraokeClient, EvilKaraokeConfig config) {
         this.plugin = plugin;
@@ -129,9 +134,7 @@ public final class PlaybackCoordinator {
 
     public CompletableFuture<Void> request(KaraokeTrack track, Player requester) {
         session.request(track, requester.getUniqueId(), requester.getName());
-        if (session.current().isEmpty()) {
-            Bukkit.getScheduler().runTask(plugin, this::playNext);
-        }
+        schedulePlaybackStartIfIdle();
         return CompletableFuture.completedFuture(null);
     }
 
@@ -139,14 +142,26 @@ public final class PlaybackCoordinator {
         if (tracks.isEmpty()) {
             return CompletableFuture.completedFuture(0);
         }
-        boolean shouldStart = session.current().isEmpty();
-        for (KaraokeTrack track : tracks) {
-            session.request(track, requester.getUniqueId(), requester.getName());
+        int queued = session.requestAll(tracks, requester.getUniqueId(), requester.getName());
+        schedulePlaybackStartIfIdle();
+        return CompletableFuture.completedFuture(queued);
+    }
+
+    private void schedulePlaybackStartIfIdle() {
+        if (session.current().isPresent() || !playbackStartQueued.compareAndSet(false, true)) {
+            return;
         }
-        if (shouldStart) {
-            Bukkit.getScheduler().runTask(plugin, this::playNext);
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                playbackStartQueued.set(false);
+                if (session.current().isEmpty()) {
+                    playNext();
+                }
+            });
+        } catch (RuntimeException ex) {
+            playbackStartQueued.set(false);
+            throw ex;
         }
-        return CompletableFuture.completedFuture(tracks.size());
     }
 
     public void playNext() {
@@ -172,6 +187,7 @@ public final class PlaybackCoordinator {
         currentStreamTrack = streamTrack;
         timerStarted = false;
         clientDrivenPlayback = false;
+        clientStartWaitAttempts = 0;
         Instant scheduledStart = Instant.now().plus(SERVER_STREAM_START_DELAY);
         AudioCommandPacket packet = new AudioCommandPacket(
                 AudioCommandType.PLAY,
@@ -217,15 +233,23 @@ public final class PlaybackCoordinator {
         currentStreamTrack = null;
         timerStarted = false;
         clientDrivenPlayback = false;
+        clientStartWaitAttempts = 0;
     }
 
-    public void pause() {
+    public boolean pause() {
+        if (session.snapshot().state() != PlaybackState.PLAYING) {
+            return false;
+        }
         session.pause();
         cancelAutoAdvance();
         broadcastControl(AudioCommandType.PAUSE, "pause");
+        return true;
     }
 
-    public void resume() {
+    public boolean resume() {
+        if (session.snapshot().state() != PlaybackState.PAUSED) {
+            return false;
+        }
         session.resume();
         if (currentPlaybackId != null) {
             session.current().ifPresent(current -> {
@@ -241,23 +265,39 @@ public final class PlaybackCoordinator {
             });
         }
         broadcastControl(AudioCommandType.RESUME, "resume");
+        return true;
     }
 
-    public void skip() {
-        broadcastControl(AudioCommandType.STOP, "skip");
+    public boolean skip() {
+        boolean hasCurrent = session.current().isPresent();
+        if (!hasCurrent && session.queuedTracks().isEmpty()) {
+            return false;
+        }
+        if (hasCurrent) {
+            broadcastControl(AudioCommandType.STOP, "skip");
+        }
         playNext();
+        return true;
     }
 
-    public void previous() {
-        session.previous().ifPresentOrElse(
-                queued -> beginPlayback(queued, "previous"),
-                () -> plugin.getLogger().fine("No previous track in history."));
+    public boolean previous() {
+        java.util.Optional<KaraokeSession.QueuedTrack> previous = session.previous();
+        if (previous.isEmpty()) {
+            plugin.getLogger().fine("No previous track in history.");
+            return false;
+        }
+        beginPlayback(previous.get(), "previous");
+        return true;
     }
 
-    public void stop() {
+    public boolean stop() {
+        if (session.current().isEmpty() && session.snapshot().state() == PlaybackState.IDLE) {
+            return false;
+        }
         broadcastControl(AudioCommandType.STOP, "stop");
         session.stopCurrent();
         clearPlaybackTracking();
+        return true;
     }
 
     /**
@@ -271,9 +311,13 @@ public final class PlaybackCoordinator {
         }
 
         ClientPlaybackReport previous = clientStates.get(playerId);
+        // A client only counts as participating in this playback once it reports
+        // activity (or an error) for it. A bare STOPPED as the very first report
+        // is a stale echo of the previous track ending on the client; honoring
+        // it as "this track already finished" would skip the fresh track.
         boolean started = (previous != null && previous.started())
-                || status.state() == ClientPlaybackState.PLAYING
-                || isTerminal(status.state());
+                || isActive(status.state())
+                || status.state() == ClientPlaybackState.ERROR;
         clientStates.put(playerId, new ClientPlaybackReport(
                 status.state(),
                 Instant.now(),
@@ -306,6 +350,7 @@ public final class PlaybackCoordinator {
         }
         timerStarted = true;
         clientDrivenPlayback = clientConfirmed;
+        clientStartWaitAttempts = 0;
         session.startTimer();
         cancelAutoAdvance();
         if (clientDrivenPlayback) {
@@ -451,6 +496,28 @@ public final class PlaybackCoordinator {
         }
     }
 
+    /** Sends one lyric-display action to a compatible client. */
+    public boolean setLyrics(Player player, LyricsDisplayAction action) {
+        if (player == null || !clientRegistry.supportsLyrics(player.getUniqueId())) {
+            return false;
+        }
+        messenger.send(player, new AudioCommandPacket(
+                AudioCommandType.LYRICS,
+                KaraokeSession.GLOBAL_SESSION_ID,
+                currentPlaybackId == null ? "none" : currentPlaybackId,
+                null,
+                null,
+                Duration.ZERO,
+                Instant.now(),
+                action.reason(),
+                Duration.ZERO));
+        return true;
+    }
+
+    public boolean toggleLyrics(Player player) {
+        return setLyrics(player, LyricsDisplayAction.TOGGLE);
+    }
+
     private void broadcastControl(AudioCommandType type, String reason) {
         KaraokeSession.PlaybackSnapshot snapshot = session.snapshot();
         String playbackId = currentPlaybackId == null ? "none" : currentPlaybackId;
@@ -544,8 +611,13 @@ public final class PlaybackCoordinator {
             if (currentPlaybackId == null || !currentPlaybackId.equals(playbackId) || timerStarted) {
                 return;
             }
-            if (activePlaybackClientIds().isEmpty()) {
-                startPlaybackTimer(track, playbackId, "client start timeout with no active clients", false);
+            clientStartWaitAttempts++;
+            boolean deadlineReached = clientStartWaitAttempts >= MAX_CLIENT_START_WAIT_ATTEMPTS;
+            if (noClientCanConfirmStart() || deadlineReached) {
+                String reason = deadlineReached
+                        ? "client start deadline expired"
+                        : "client start timeout with no active clients";
+                startPlaybackTimer(track, playbackId, reason, false);
                 return;
             }
             schedulePlaybackStartFallback(track, playbackId);
@@ -609,6 +681,24 @@ public final class PlaybackCoordinator {
             return;
         }
         playNext();
+    }
+
+    /**
+     * True when waiting longer cannot produce a playback confirmation: either no
+     * playback client is online, or every one of them already reported a terminal
+     * state for this track (a sub-second track can finish between two status
+     * ticks, so its only report is STOPPED). Falling back to the metadata timer
+     * keeps the queue moving instead of rescheduling the start check forever.
+     */
+    private boolean noClientCanConfirmStart() {
+        List<UUID> activeClients = activePlaybackClientIds();
+        if (activeClients.isEmpty()) {
+            return true;
+        }
+        return activeClients.stream().allMatch(playerId -> {
+            ClientPlaybackReport report = clientStates.get(playerId);
+            return report != null && isTerminal(report.state());
+        });
     }
 
     private boolean maybeAdvanceAfterClientReports() {

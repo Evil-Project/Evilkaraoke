@@ -22,6 +22,25 @@ import org.junit.jupiter.api.Test;
 
 class EvilKaraokeCommandTest {
     @Test
+    void suggestsLyricsActions() {
+        assertEquals(List.of("enable", "disable"), EvilKaraokeCommand.lyricsActionSuggestions(""));
+        assertEquals(List.of("enable"), EvilKaraokeCommand.lyricsActionSuggestions("E"));
+        assertEquals(List.of("disable"), EvilKaraokeCommand.lyricsActionSuggestions("d"));
+    }
+
+    @Test
+    void playbackControlsExplainNoOpStates() {
+        assertEquals("Nothing is playing and the queue is empty.",
+                EvilKaraokeCommand.playbackControlUnavailableMessage("next"));
+        assertEquals("No previous track is available.",
+                EvilKaraokeCommand.playbackControlUnavailableMessage("previous"));
+        assertEquals("Playback is not paused.",
+                EvilKaraokeCommand.playbackControlUnavailableMessage("resume"));
+        assertEquals("Nothing is currently playing.",
+                EvilKaraokeCommand.playbackControlUnavailableMessage("stop"));
+    }
+
+    @Test
     void queueShowsCurrentTrackWhenNoUpcomingSongsRemain() {
         KaraokeTrack track = track("brick", "Brick by Boring Brick");
         KaraokeSession.QueuedTrack current = new KaraokeSession.QueuedTrack(track, null, "Player", Instant.now());
@@ -169,6 +188,7 @@ class EvilKaraokeCommandTest {
         List<Component> messages = EvilKaraokeCommand.searchMessages("hello world", 2, results, "ek");
 
         assertEquals(expectedSearchHeader("hello world", 2), messages.getFirst());
+        assertEquals("6. Song 1 - Unknown Artist [Request]", ChatMessages.plain(messages.get(1)));
         assertEquals(7, messages.size());
         assertEquals(Component.empty()
                 .append(Component.text("⬆️ ", NamedTextColor.AQUA)
@@ -186,7 +206,7 @@ class EvilKaraokeCommandTest {
 
         List<Component> messages = EvilKaraokeCommand.searchMessages("cover", 1, results, "ek", false);
 
-        assertEquals("- Covered Song - Original Artist (covered by Neuro & Evil) [Request]",
+        assertEquals("1. Covered Song - Original Artist (covered by Neuro & Evil) [Request]",
                 ChatMessages.plain(messages.get(1)));
     }
 
@@ -211,8 +231,8 @@ class EvilKaraokeCommandTest {
 
         List<Component> messages = EvilKaraokeCommand.searchMessages("unsafe", 1, results, "ek", false);
 
-        assertEquals("- Unsafe - Unknown Artist (request with /ek request id bad id)", ChatMessages.plain(messages.get(1)));
-        assertEquals(Component.text("- ", NamedTextColor.DARK_GRAY)
+        assertEquals("1. Unsafe - Unknown Artist (request with /ek request id bad id)", ChatMessages.plain(messages.get(1)));
+        assertEquals(Component.text("1. ", NamedTextColor.GOLD)
                 .append(expectedSongLine("Unsafe", "Unknown Artist"))
                 .append(Component.text(" ", NamedTextColor.GRAY))
                 .append(Component.text("(request with /ek request id bad id)", NamedTextColor.YELLOW)), messages.get(1));

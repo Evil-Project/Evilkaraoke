@@ -6,6 +6,7 @@ A Minecraft karaoke system for Paper, Fabric, and NeoForge servers with Fabric a
 
 - Server-authoritative queue management — command logic runs on Paper, Fabric, or NeoForge servers
 - Client audio playback — Fabric and NeoForge mods stream audio from HTTP sources via JavaSound
+- Timed lyrics — Neurokaraoke song lyrics appear in the title-command action bar, synced to the audio position; disabled by default and controlled with `/ek lyrics [enable|disable]`
 - Distance-based spatial audio — volume attenuates based on player position and world
 - Multi-loader support — Fabric and NeoForge clients on the same server
 - Audience targeting — play for all players, specific players, or yourself (like `/playsound`)
@@ -65,6 +66,7 @@ Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and N
 1. Install Fabric Loader 0.19.3+ for Minecraft 26.2
 2. Place `Evilkaraoke-Fabric-1.0.1.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running the Evilkaraoke Paper plugin or Fabric server mod
+4. Timed lyrics are disabled by default; enable them with `/ek lyrics enable`
 
 ### Server (Fabric)
 
@@ -80,6 +82,7 @@ The Fabric jar is both the server mod and the client audio mod. On a Paper serve
 1. Install NeoForge 26.2.0.7-beta+ for Minecraft 26.2
 2. Place `Evilkaraoke-NeoForge-1.0.1.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running Evilkaraoke
+4. Timed lyrics are disabled by default; enable them with `/ek lyrics enable`
 
 For a NeoForge server, place the same NeoForge jar in the server `mods/` directory. It registers the same command surface and server-authoritative playback flow as the Paper plugin.
 
@@ -117,6 +120,7 @@ All commands use `/ek`.
 - `/ek current` — Show currently playing track
 - `/ek randomsong [page]` — Show a paged random-song playlist with queue-one and queue-all actions
 - `/ek randomsong queue <all|row>` — Queue all latest random songs or one row from the latest random-song playlist
+- `/ek lyrics [enable|disable]` — Toggle or set action-bar lyrics on your client (requires the client mod)
 - `/ek stats me` — View your statistics
 - `/ek stats server` — View server statistics
 
@@ -189,7 +193,7 @@ On Fabric, Evilkaraoke uses `fabric-permissions-api-v0`, so LuckPerms Fabric can
 - **shared-core** — Shared protocol (packets, models, codec) - Java 25
 - **server-core** — Loader-neutral server core (commands, queue, API client, stats)
 - **paper-plugin** — Paper plugin adapter - Paper 26.2
-- **client-core** — Loader-neutral audio engine (JavaSound, spatial volume, decoding) - Java 25
+- **client-core** — Loader-neutral audio engine and timed lyric scheduler (JavaSound, spatial volume, decoding) - Java 25
 - **fabric-mod** — Fabric client/server entrypoints + custom payload networking - MC 26.2 + Fabric
 - **neoforge-mod** — NeoForge client/server entrypoints + custom payload networking - MC 26.2 + NeoForge 26.2.0.7-beta
 
@@ -202,7 +206,7 @@ Custom payloads over three channels (JSON-encoded):
    - Contains: client version, Minecraft version, mod loader
 
 2. **evilkaraoke:audio** (Server → Client)
-   - Audio command packets: PLAY, PAUSE, RESUME, STOP, VOLUME, SYNC
+   - Audio command packets: PLAY, PAUSE, RESUME, STOP, VOLUME, SYNC, LYRICS
    - PLAY includes: track metadata, playback target, position, volume, and delivery mode
    - Normal playback uses `SERVER_STREAM`: the server downloads the audio once, broadcasts encoded audio chunks to clients, and gives them a shared scheduled start time
    - `URL` delivery remains available for compatibility and tests
@@ -210,6 +214,13 @@ Custom payloads over three channels (JSON-encoded):
 3. **evilkaraoke:status** (Client → Server)
    - Client playback state: READY, PLAYING, PAUSED, BUFFERING, ERROR
    - Used for diagnostics and `/ek doctor` command
+
+When a Neurokaraoke song starts, each client fetches timed cues from
+`https://api.neurokaraoke.com/api/songs/{songId}/lyrics`. Cue timing follows the
+decoded audio position, including pauses and late joins. Radio streams and direct
+URL requests do not have Neurokaraoke song UUIDs, so they do not show lyrics.
+Lyrics are off on first launch; the client remembers later changes in
+`config/evilkaraoke-client.json`.
 
 ### Playback Targeting (Audience)
 
@@ -314,6 +325,7 @@ Tests cover:
 - Playback state machine (play, pause, resume, stop)
 - Statistics tracking (plays, requests, leaderboards)
 - Spatial audio (distance attenuation, cross-world)
+- Timed lyric parsing, lifecycle, and playback-position synchronization
 
 ## Troubleshooting
 
@@ -336,6 +348,14 @@ Tests cover:
 - Ensure Minecraft's Master and Jukebox/Records sliders are above zero
 - Ensure client has JavaSound support (should work on all platforms)
 - Check client logs for decoding errors
+
+### Lyrics not showing
+
+- Run `/ek lyrics enable` to turn lyrics on; the client remembers the setting across restarts
+- Ensure the HUD is visible; Minecraft hides action-bar text with the HUD
+- Verify `https://api.neurokaraoke.com` is reachable from the client
+- Confirm the queued track is a Neurokaraoke song rather than radio or a direct URL
+- Some songs return an empty lyrics list and will play without lyrics
 
 ### "API request failed"
 

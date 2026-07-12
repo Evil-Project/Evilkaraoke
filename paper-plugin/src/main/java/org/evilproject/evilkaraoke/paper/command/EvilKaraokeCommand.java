@@ -25,6 +25,7 @@ import org.bukkit.plugin.Plugin;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
 import org.evilproject.evilkaraoke.common.model.PlaybackState;
 import org.evilproject.evilkaraoke.common.model.UserAudioTracks;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.evilproject.evilkaraoke.common.security.AudioUrlValidator;
 import org.evilproject.evilkaraoke.common.util.DurationFormatter;
 import org.evilproject.evilkaraoke.paper.api.NeurokaraokeApiUnavailableException;
@@ -46,7 +47,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
     private static final List<String> CANONICAL_ROOT_SUBCOMMANDS = List.of(
             "help", "doctor", "listeners", "reload", "randomsong", "request", "search",
             "setlist", "playlist", "radio", "current", "queue",
-            "audience", "stats", "issue"
+            "audience", "stats", "issue", "lyrics"
     );
 
     private final Plugin plugin;
@@ -99,6 +100,7 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
             case "issue" -> issue(sender);
             case "setlist" -> setlist(sender, args, label);
             case "playlist" -> playlist(sender, args, label);
+            case "lyrics" -> lyrics(sender, args);
             default -> unknown(sender);
         };
     }
@@ -157,8 +159,29 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Component.text("/" + label + " queue previous|next - navigate tracks", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " audience <@a|@s|player> - choose who hears playback (/playsound-style)", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " radio <radio21|swarmfm> - start radio", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/" + label + " lyrics [enable|disable] - toggle or set lyric captions on your client", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " stats <me|user|server|top> - stats", NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("/" + label + " doctor - verify readiness", NamedTextColor.YELLOW));
+        return true;
+    }
+
+    private boolean lyrics(CommandSender sender, String[] args) {
+        if (args.length > 2) {
+            sender.sendMessage(Component.text("Usage: /ek lyrics [enable|disable]", NamedTextColor.YELLOW));
+            return true;
+        }
+        var action = LyricsDisplayAction.parseCommandArgument(args.length == 2 ? args[1] : null);
+        if (action.isEmpty()) {
+            sender.sendMessage(Component.text("Usage: /ek lyrics [enable|disable]", NamedTextColor.YELLOW));
+            return true;
+        }
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(Component.text("Only players can change lyric captions.", NamedTextColor.RED));
+            return true;
+        }
+        if (!coordinator.setLyrics(player, action.get())) {
+            sender.sendMessage(Component.text("You need an updated Evilkaraoke client mod to see lyric captions.", NamedTextColor.RED));
+        }
         return true;
     }
 
@@ -821,15 +844,20 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
         if (!canUsePlaybackControl(sender, action)) {
             return deny(sender);
         }
-        switch (action) {
+        boolean applied = switch (action) {
             case "pause" -> coordinator.pause();
             case "resume" -> coordinator.resume();
             case "next" -> coordinator.skip();
             case "previous" -> coordinator.previous();
             case "stop" -> coordinator.stop();
             default -> {
-                return unknown(sender);
+                unknown(sender);
+                yield false;
             }
+        };
+        if (!applied) {
+            sender.sendMessage(Component.text(playbackControlUnavailableMessage(action), NamedTextColor.YELLOW));
+            return refresh ? refreshQueue(sender, label, page) : true;
         }
         if (refresh) {
             return refreshQueue(sender, label, page);
@@ -844,6 +872,15 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
             case "next" -> "Skipping to next track.";
             case "stop" -> "Playback stopped.";
             default -> "Playback " + action + " sent to listeners.";
+        };
+    }
+
+    static String playbackControlUnavailableMessage(String action) {
+        return switch (action) {
+            case "previous" -> "No previous track is available.";
+            case "next" -> "Nothing is playing and the queue is empty.";
+            case "resume" -> "Playback is not paused.";
+            default -> "Nothing is currently playing.";
         };
     }
 
@@ -1117,7 +1154,8 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
                         .clickEvent(ClickEvent.runCommand("/" + label + " search queue-all"))));
         for (int i = 0; i < Math.min(results.size(), CHAT_PAGE_SIZE); i++) {
             KaraokeTrack track = results.get(i);
-            Component line = Component.text("- ", NamedTextColor.DARK_GRAY)
+            int number = ((page - 1) * CHAT_PAGE_SIZE) + i + 1;
+            Component line = Component.text(number + ". ", NamedTextColor.GOLD)
                     .append(songLineComponent(track))
                     .append(Component.text(" ", NamedTextColor.GRAY));
             if (safeCommandToken(track.id())) {
@@ -1331,6 +1369,9 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
         if (args.length == 2 && "request".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("id", "url"), args[1]);
         }
+        if (args.length == 2 && "lyrics".equalsIgnoreCase(args[0])) {
+            return lyricsActionSuggestions(args[1]);
+        }
         if (args.length == 2 && "randomsong".equalsIgnoreCase(args[0])) {
             return filterPrefix(List.of("queue", "1"), args[1]);
         }
@@ -1384,6 +1425,10 @@ public final class EvilKaraokeCommand implements CommandExecutor, TabCompleter {
             return filterPrefix(queuePositionSuggestions(sender), args[2]);
         }
         return List.of();
+    }
+
+    static List<String> lyricsActionSuggestions(String prefix) {
+        return filterPrefix(List.of("enable", "disable"), prefix);
     }
 
     private List<String> onlinePlayerNames() {

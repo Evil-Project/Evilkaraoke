@@ -1,7 +1,9 @@
 package org.evilproject.evilkaraoke.server.platform;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -27,6 +29,7 @@ public final class TickTaskScheduler {
     }
 
     public void tick() {
+        List<Runnable> dueTasks = new ArrayList<>();
         Iterator<Map.Entry<Integer, ScheduledTask>> iterator = tasks.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Integer, ScheduledTask> entry = iterator.next();
@@ -34,11 +37,14 @@ public final class TickTaskScheduler {
             task.remainingTicks--;
             if (task.remainingTicks <= 0L) {
                 iterator.remove();
-                try {
-                    task.task.run();
-                } catch (RuntimeException ex) {
-                    logger.log(Level.WARNING, "Scheduled Evilkaraoke task failed", ex);
-                }
+                dueTasks.add(task.task);
+            }
+        }
+        for (Runnable task : dueTasks) {
+            try {
+                task.run();
+            } catch (RuntimeException ex) {
+                logger.log(Level.WARNING, "Scheduled Evilkaraoke task failed", ex);
             }
         }
     }

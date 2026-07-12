@@ -22,3 +22,8 @@ run/
 
 # IDE run configurations
 .run/
+
+# Graphify
+.graphify*
+graphify-out/
+

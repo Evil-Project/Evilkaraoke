@@ -6,6 +6,7 @@ import java.util.logging.Logger;
 import org.evilproject.evilkaraoke.client.audio.AudioBackend;
 import org.evilproject.evilkaraoke.client.audio.AudioBackendStatus;
 import org.evilproject.evilkaraoke.client.audio.JavaSoundAudioBackend;
+import org.evilproject.evilkaraoke.client.lyrics.LyricsPlaybackController;
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.codec.PacketCodecException;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
@@ -16,6 +17,7 @@ import org.evilproject.evilkaraoke.common.protocol.AudioCommandType;
 import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.evilproject.evilkaraoke.common.protocol.ProtocolPacket;
 
 /**
@@ -28,6 +30,7 @@ public final class ClientAudioController {
     private final Logger logger;
     private final JsonPacketCodec codec = new JsonPacketCodec();
     private final AudioBackend backend;
+    private final LyricsPlaybackController lyricsController;
     private final String modVersion;
     private final String minecraftVersion;
     private final String loader;
@@ -55,14 +58,23 @@ public final class ClientAudioController {
     private boolean serverStreamSequenceBaselined = false;
     /** Optional hook called on the game thread when a PLAY command is dispatched. */
     private Consumer<KaraokeTrack> onPlayCallback;
+    /** Optional hook called on the game thread after a LYRICS command applies its state. */
+    private volatile Consumer<Boolean> onLyricsToggledCallback;
+    private volatile boolean lyricsEnabled = false;
 
     public ClientAudioController(Logger logger, String modVersion, String minecraftVersion, String loader) {
         this(logger, new JavaSoundAudioBackend(), modVersion, minecraftVersion, loader);
     }
 
     public ClientAudioController(Logger logger, AudioBackend backend, String modVersion, String minecraftVersion, String loader) {
+        this(logger, backend, modVersion, minecraftVersion, loader, new LyricsPlaybackController(logger));
+    }
+
+    ClientAudioController(Logger logger, AudioBackend backend, String modVersion, String minecraftVersion, String loader,
+                          LyricsPlaybackController lyricsController) {
         this.logger = logger;
         this.backend = backend;
+        this.lyricsController = lyricsController;
         this.modVersion = modVersion;
         this.minecraftVersion = minecraftVersion;
         this.loader = loader;
@@ -70,11 +82,41 @@ public final class ClientAudioController {
 
     /**
      * Sets a callback invoked (on the game thread) whenever a PLAY command is
-     * dispatched. Loader modules use this to show a music toast without pulling
-     * Minecraft API into client-core. Pass {@code null} to clear.
+     * dispatched. Loader modules use this to reset track-specific UI without
+     * pulling Minecraft API into client-core. Pass {@code null} to clear.
      */
     public void setOnPlay(Consumer<KaraokeTrack> callback) {
         this.onPlayCallback = callback;
+    }
+
+    /** Sets the game-specific renderer used for each due lyric line. */
+    public void setOnLyric(Consumer<String> callback) {
+        lyricsController.setRenderer(callback);
+    }
+
+    /** Sets the game-specific callback used to clear the current lyric line. */
+    public void setOnLyricClear(Runnable callback) {
+        lyricsController.setClearer(callback);
+    }
+
+    /**
+     * Sets a callback invoked with the resulting state whenever a server
+     * LYRICS command is applied. Pass {@code null} to clear.
+     */
+    public void setOnLyricsToggled(Consumer<Boolean> callback) {
+        this.onLyricsToggledCallback = callback;
+    }
+
+    /** Sets the locally persisted lyric preference without emitting a notification. */
+    public void setLyricsEnabled(boolean lyricsEnabled) {
+        boolean wasEnabled = this.lyricsEnabled;
+        this.lyricsEnabled = lyricsEnabled;
+        updateLyricsDisplayState(wasEnabled, lyricsEnabled);
+    }
+
+    /** @return whether lyric captions are currently enabled on this client. */
+    public boolean lyricsEnabled() {
+        return lyricsEnabled;
     }
 
     /**
@@ -84,6 +126,7 @@ public final class ClientAudioController {
     public void stopAll() {
         closeCurrentServerStream();
         backend.stop(null);
+        lyricsController.stop();
         currentPlaybackId = null;
         pendingServerStreamCommand = null;
     }
@@ -175,6 +218,11 @@ public final class ClientAudioController {
         backend.setGameVolume(linearGain);
     }
 
+    /** Advances timed lyrics from the actual decoded-audio position. */
+    public void tickLyrics() {
+        lyricsController.tick(lyricsEnabled, effectiveStatus().state(), backend.playbackPosition());
+    }
+
     public SoundCategory soundCategory() {
         return soundCategory;
     }
@@ -198,7 +246,8 @@ public final class ClientAudioController {
                     backend.play(command);
                 }
                 currentPlaybackId = command.playbackId();
-                if (onPlayCallback != null && command.track() != null) {
+                lyricsController.handleCommand(command);
+                if (onPlayCallback != null) {
                     onPlayCallback.accept(command.track());
                 }
             }
@@ -218,6 +267,7 @@ public final class ClientAudioController {
                     resetStreamSequenceStats();
                     pendingServerStreamCommand = null;
                     backend.stop(command);
+                    lyricsController.handleCommand(command);
                     currentPlaybackId = null;
                 }
             }
@@ -230,6 +280,23 @@ public final class ClientAudioController {
             case SYNC -> {
                 // Continuous local playback already tracks the stream; nothing to reseek.
             }
+            case LYRICS -> LyricsDisplayAction.fromReason(command.reason()).ifPresent(action -> {
+                boolean wasEnabled = lyricsEnabled;
+                lyricsEnabled = action.apply(wasEnabled);
+                updateLyricsDisplayState(wasEnabled, lyricsEnabled);
+                Consumer<Boolean> callback = onLyricsToggledCallback;
+                if (callback != null) {
+                    callback.accept(lyricsEnabled);
+                }
+            });
+        }
+    }
+
+    private void updateLyricsDisplayState(boolean wasEnabled, boolean enabled) {
+        if (wasEnabled && !enabled) {
+            lyricsController.clearDisplay();
+        } else if (!wasEnabled && enabled) {
+            lyricsController.resync();
         }
     }
 

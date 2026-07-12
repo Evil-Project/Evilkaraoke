@@ -6,10 +6,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.bukkit.entity.Player;
 import org.evilproject.evilkaraoke.common.model.KaraokeTrack;
@@ -24,6 +27,7 @@ public final class KaraokeSession {
     private final Deque<QueuedTrack> randomTracks = new ArrayDeque<>();
     /** Tracks that have already played, most-recent last. Bounded to MAX_HISTORY entries. */
     private final Deque<QueuedTrack> history = new ArrayDeque<>();
+    private final Set<QueuedTrack> loopExcludedTracks = new HashSet<>();
     private PlaybackState state = PlaybackState.IDLE;
     private QueuedTrack current;
     private Instant startedAt;
@@ -31,14 +35,33 @@ public final class KaraokeSession {
     private float volume = 1.0f;
     private boolean randomEnabled;
     private boolean loopQueueEnabled;
+    private boolean currentRetainedInQueue;
     private QueuedTrack singleLoopTrack;
 
     public synchronized void request(KaraokeTrack track, UUID requester, String requesterName) {
-        requests.add(new QueuedTrack(track, requester, requesterName, Instant.now()));
+        QueuedTrack queued = new QueuedTrack(track, requester, requesterName, Instant.now());
+        if (randomEnabled) {
+            insertAtRandomPosition(requests, queued);
+        } else {
+            requests.add(queued);
+        }
+    }
+
+    public synchronized int requestAll(List<KaraokeTrack> tracks, UUID requester, String requesterName) {
+        for (KaraokeTrack track : tracks) {
+            requests.add(new QueuedTrack(track, requester, requesterName, Instant.now()));
+        }
+        shuffleRequestsIfRandomEnabled();
+        return tracks.size();
     }
 
     public synchronized void addRandom(KaraokeTrack track) {
-        randomTracks.add(new QueuedTrack(track, null, "Evilkaraoke", Instant.now()));
+        QueuedTrack queued = new QueuedTrack(track, null, "Evilkaraoke", Instant.now());
+        if (randomEnabled) {
+            insertAtRandomPosition(randomTracks, queued);
+        } else {
+            randomTracks.add(queued);
+        }
     }
 
     public synchronized Optional<QueuedTrack> next() {
@@ -52,9 +75,9 @@ public final class KaraokeSession {
         if (previous != null) {
             history.addLast(previous);
             if (history.size() > MAX_HISTORY) {
-                history.removeFirst();
+                loopExcludedTracks.remove(history.removeFirst());
             }
-            if (loopQueueEnabled) {
+            if (loopQueueEnabled && !currentRetainedInQueue && !loopExcludedTracks.contains(previous)) {
                 requests.addLast(previous);
             }
         }
@@ -95,10 +118,16 @@ public final class KaraokeSession {
         // If something is currently playing, push it back to the front of requests
         // so it isn't lost — the user can still get back to it with /ek next.
         if (current != null) {
+            if (currentRetainedInQueue) {
+                removeQueuedOccurrence(current);
+            }
             requests.addFirst(current);
+            loopExcludedTracks.remove(current);
         }
         QueuedTrack prev = history.removeLast();
         current = prev;
+        currentRetainedInQueue = loopQueueEnabled
+                && (requests.contains(prev) || randomTracks.contains(prev));
         state = PlaybackState.PLAYING;
         // Don't start the timer yet - wait for client confirmation via startTimer()
         startedAt = null;
@@ -130,7 +159,9 @@ public final class KaraokeSession {
         requests.clear();
         randomTracks.clear();
         history.clear();
+        loopExcludedTracks.clear();
         singleLoopTrack = null;
+        currentRetainedInQueue = false;
         startedAt = null;
         pausedOffset = Duration.ZERO;
         state = PlaybackState.IDLE;
@@ -141,7 +172,9 @@ public final class KaraokeSession {
         if (sameQueuedTrack(current, singleLoopTrack)) {
             singleLoopTrack = null;
         }
+        loopExcludedTracks.remove(current);
         current = null;
+        currentRetainedInQueue = false;
         startedAt = null;
         pausedOffset = Duration.ZERO;
         state = PlaybackState.IDLE;
@@ -151,6 +184,7 @@ public final class KaraokeSession {
     public synchronized boolean skip() {
         if (current != null) {
             current = null;
+            currentRetainedInQueue = false;
             startedAt = null;
             pausedOffset = Duration.ZERO;
             state = PlaybackState.IDLE;
@@ -215,6 +249,7 @@ public final class KaraokeSession {
         if (sameQueuedTrack(removed, singleLoopTrack)) {
             singleLoopTrack = null;
         }
+        excludeCurrentFromLoopIfRemoved(removed);
 
         // Remove from the appropriate queue
         if (position < requests.size()) {
@@ -237,6 +272,9 @@ public final class KaraokeSession {
 
     public synchronized List<QueuedTrack> removeAllQueued() {
         List<QueuedTrack> removed = queuedTracks();
+        if (removed.stream().anyMatch(queued -> sameQueuedTrack(queued, current))) {
+            excludeCurrentFromLoopIfRemoved(current);
+        }
         requests.clear();
         randomTracks.clear();
         singleLoopTrack = null;
@@ -260,6 +298,9 @@ public final class KaraokeSession {
         requests.addAll(remaining);
         if (removed.stream().anyMatch(queued -> sameQueuedTrack(queued, singleLoopTrack))) {
             singleLoopTrack = null;
+        }
+        if (removed.stream().anyMatch(queued -> sameQueuedTrack(queued, current))) {
+            excludeCurrentFromLoopIfRemoved(current);
         }
         return removed;
     }
@@ -287,6 +328,11 @@ public final class KaraokeSession {
 
     public synchronized boolean toggleQueueLoop() {
         loopQueueEnabled = !loopQueueEnabled;
+        if (!loopQueueEnabled && currentRetainedInQueue && current != null) {
+            removeQueuedOccurrence(current);
+            currentRetainedInQueue = false;
+        }
+        loopExcludedTracks.clear();
         return loopQueueEnabled;
     }
 
@@ -317,12 +363,52 @@ public final class KaraokeSession {
     }
 
     private QueuedTrack pollNext() {
+        currentRetainedInQueue = false;
         QueuedTrack next = requests.poll();
-        return next == null ? pollNext(randomTracks) : next;
+        if (next != null) {
+            loopExcludedTracks.remove(next);
+            if (loopQueueEnabled) {
+                // Keep looped tracks visible in the queue: the playing track
+                // moves to the tail instead of being removed.
+                requests.addLast(next);
+                currentRetainedInQueue = true;
+            }
+            return next;
+        }
+        next = randomTracks.poll();
+        if (next != null) {
+            loopExcludedTracks.remove(next);
+            if (loopQueueEnabled) {
+                randomTracks.addLast(next);
+                currentRetainedInQueue = true;
+            }
+        }
+        return next;
     }
 
-    private QueuedTrack pollNext(Deque<QueuedTrack> queue) {
-        return queue.poll();
+    private void excludeCurrentFromLoopIfRemoved(QueuedTrack removed) {
+        if (!loopQueueEnabled || !sameQueuedTrack(removed, current)) {
+            return;
+        }
+        currentRetainedInQueue = false;
+        loopExcludedTracks.add(current);
+    }
+
+    private boolean removeQueuedOccurrence(QueuedTrack track) {
+        return requests.removeLastOccurrence(track) || randomTracks.removeLastOccurrence(track);
+    }
+
+    private void shuffleRequestsIfRandomEnabled() {
+        if (randomEnabled) {
+            shuffleQueue(requests);
+        }
+    }
+
+    private static void insertAtRandomPosition(Deque<QueuedTrack> queue, QueuedTrack track) {
+        List<QueuedTrack> tracks = new ArrayList<>(queue);
+        tracks.add(ThreadLocalRandom.current().nextInt(tracks.size() + 1), track);
+        queue.clear();
+        queue.addAll(tracks);
     }
 
     private static void shuffleQueue(Deque<QueuedTrack> queue) {

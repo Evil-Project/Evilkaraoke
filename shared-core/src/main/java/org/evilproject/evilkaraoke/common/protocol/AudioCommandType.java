@@ -6,5 +6,7 @@ public enum AudioCommandType {
     RESUME,
     STOP,
     SYNC,
-    VOLUME
+    VOLUME,
+    /** Asks the receiving client to update its lyric caption display. */
+    LYRICS
 }

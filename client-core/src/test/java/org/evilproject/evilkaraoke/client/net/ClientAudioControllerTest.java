@@ -13,11 +13,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 import org.evilproject.evilkaraoke.client.audio.AudioBackend;
 import org.evilproject.evilkaraoke.client.audio.AudioBackendStatus;
+import org.evilproject.evilkaraoke.client.lyrics.LyricsPlaybackController;
+import org.evilproject.evilkaraoke.client.lyrics.TimedLyric;
 import org.evilproject.evilkaraoke.common.codec.JsonPacketCodec;
 import org.evilproject.evilkaraoke.common.model.AudioAsset;
 import org.evilproject.evilkaraoke.common.model.AudioFormat;
@@ -32,6 +35,7 @@ import org.evilproject.evilkaraoke.common.protocol.AudioDeliveryMode;
 import org.evilproject.evilkaraoke.common.protocol.AudioStreamChunkPacket;
 import org.evilproject.evilkaraoke.common.protocol.ClientPlaybackState;
 import org.evilproject.evilkaraoke.common.protocol.ClientStatusPacket;
+import org.evilproject.evilkaraoke.common.protocol.LyricsDisplayAction;
 import org.junit.jupiter.api.Test;
 
 class ClientAudioControllerTest {
@@ -44,7 +48,14 @@ class ClientAudioControllerTest {
 
     private AudioCommandPacket packet(AudioCommandType type) {
         return new AudioCommandPacket(type, "global", "p1", track(), PlaybackTarget.allPlayers(),
-                Duration.ZERO, Instant.EPOCH, "", Duration.ZERO);
+                Duration.ZERO, Instant.EPOCH,
+                type == AudioCommandType.LYRICS ? LyricsDisplayAction.TOGGLE.reason() : "",
+                Duration.ZERO);
+    }
+
+    private AudioCommandPacket lyricsPacket(LyricsDisplayAction action) {
+        return new AudioCommandPacket(AudioCommandType.LYRICS, "global", "p1", null, null,
+                Duration.ZERO, Instant.EPOCH, action.reason(), Duration.ZERO);
     }
 
     private AudioCommandPacket serverStreamPacket() {
@@ -221,7 +232,10 @@ class ClientAudioControllerTest {
     @Test
     void helloPayloadRoundTrips() {
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), new RecordingBackend(), "0.1.0", "26.2", "test");
-        assertNotNull(codec.decode(controller.helloPayload()));
+        var hello = assertInstanceOf(
+                org.evilproject.evilkaraoke.common.protocol.ClientHelloPacket.class,
+                codec.decode(controller.helloPayload()));
+        assertTrue(hello.supportsLyrics());
     }
 
     @Test
@@ -313,18 +327,18 @@ class ClientAudioControllerTest {
     }
 
     @Test
-    void duplicatePlayForCurrentPlaybackDoesNotRestartAudioOrToast() {
+    void duplicatePlayForCurrentPlaybackDoesNotRestartAudioOrRepeatPlayCallback() {
         RecordingBackend backend = new RecordingBackend();
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
-        AtomicInteger toastCount = new AtomicInteger();
-        controller.setOnPlay(track -> toastCount.incrementAndGet());
+        AtomicInteger playCallbackCount = new AtomicInteger();
+        controller.setOnPlay(track -> playCallbackCount.incrementAndGet());
         byte[] playPayload = codec.encode(packet(AudioCommandType.PLAY));
 
         controller.handleAudioPayload(playPayload);
         controller.handleAudioPayload(playPayload);
 
         assertEquals(List.of("play"), backend.calls);
-        assertEquals(1, toastCount.get());
+        assertEquals(1, playCallbackCount.get());
     }
 
     @Test
@@ -341,11 +355,34 @@ class ClientAudioControllerTest {
     }
 
     @Test
+    void tracklessPlayStillResetsLoaderUi() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+        AtomicInteger playCallbackCount = new AtomicInteger();
+        controller.setOnPlay(track -> playCallbackCount.incrementAndGet());
+        AudioCommandPacket play = new AudioCommandPacket(
+                AudioCommandType.PLAY,
+                "global",
+                "trackless",
+                null,
+                PlaybackTarget.allPlayers(),
+                Duration.ZERO,
+                Instant.EPOCH,
+                "",
+                Duration.ZERO);
+
+        controller.handleAudioPayload(codec.encode(play));
+
+        assertEquals(1, playCallbackCount.get());
+    }
+
+    @Test
     void playAfterDisconnectCanReuseServerPlaybackId() {
         RecordingBackend backend = new RecordingBackend();
         ClientAudioController controller = new ClientAudioController(Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
-        AtomicInteger toastCount = new AtomicInteger();
-        controller.setOnPlay(track -> toastCount.incrementAndGet());
+        AtomicInteger playCallbackCount = new AtomicInteger();
+        controller.setOnPlay(track -> playCallbackCount.incrementAndGet());
         byte[] playPayload = codec.encode(packet(AudioCommandType.PLAY));
 
         controller.handleAudioPayload(playPayload);
@@ -353,7 +390,7 @@ class ClientAudioControllerTest {
         controller.handleAudioPayload(playPayload);
 
         assertEquals(List.of("play", "stop", "play"), backend.calls);
-        assertEquals(2, toastCount.get());
+        assertEquals(2, playCallbackCount.get());
     }
 
     @Test
@@ -392,6 +429,158 @@ class ClientAudioControllerTest {
         assertFalse(controller.isPlaybackSessionActive());
     }
 
+    @Test
+    void ticksLyricsFromTheBackendPlaybackPosition() {
+        RecordingBackend backend = new RecordingBackend();
+        LyricsPlaybackController lyrics = new LyricsPlaybackController(
+                Logger.getLogger("test"),
+                songId -> java.util.concurrent.CompletableFuture.completedFuture(List.of(
+                        new TimedLyric(Duration.ofSeconds(10), "Current lyric"))));
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), backend, "0.1.0", "26.2", "test", lyrics);
+        List<String> rendered = new ArrayList<>();
+        controller.setOnLyric(rendered::add);
+        KaraokeTrack apiTrack = new KaraokeTrack(
+                "23b51bed-6827-4556-a427-de75940bfcdf",
+                TrackType.SONG,
+                "Title",
+                "Artist",
+                new AudioAsset("https://audio/s1.opus", AudioFormat.OPUS),
+                null,
+                Duration.ofMinutes(2));
+        AudioCommandPacket play = new AudioCommandPacket(
+                AudioCommandType.PLAY,
+                "global",
+                "lyrics-playback",
+                apiTrack,
+                PlaybackTarget.allPlayers(),
+                Duration.ZERO,
+                Instant.EPOCH,
+                "",
+                Duration.ZERO);
+
+        controller.handleAudioPayload(codec.encode(play));
+        backend.playbackPosition = Duration.ofSeconds(11);
+        // Lyrics are disabled by default, so ticking renders nothing.
+        assertFalse(controller.lyricsEnabled());
+        controller.tickLyrics();
+        assertEquals(List.of(), rendered);
+        // Toggling on resumes rendering from the playback position.
+        controller.handleAudioPayload(codec.encode(packet(AudioCommandType.LYRICS)));
+        assertTrue(controller.lyricsEnabled());
+        controller.tickLyrics();
+
+        assertEquals(List.of("Current lyric"), rendered);
+    }
+
+    @Test
+    void lyricsCommandTogglesStateAndNotifiesCallback() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+        List<Boolean> toggles = new ArrayList<>();
+        controller.setOnLyricsToggled(toggles::add);
+
+        assertFalse(controller.lyricsEnabled());
+        controller.handleAudioPayload(codec.encode(packet(AudioCommandType.LYRICS)));
+        controller.handleAudioPayload(codec.encode(packet(AudioCommandType.LYRICS)));
+
+        assertEquals(List.of(true, false), toggles);
+        assertFalse(controller.lyricsEnabled());
+    }
+
+    @Test
+    void lyricsEnableAndDisableCommandsAreIdempotent() {
+        RecordingBackend backend = new RecordingBackend();
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), backend, "0.1.0", "26.2", "test");
+        List<Boolean> changes = new ArrayList<>();
+        controller.setOnLyricsToggled(changes::add);
+
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.ENABLE)));
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.ENABLE)));
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.DISABLE)));
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.DISABLE)));
+
+        assertEquals(List.of(true, true, false, false), changes);
+        assertFalse(controller.lyricsEnabled());
+    }
+
+    @Test
+    void reEnablingLyricsRestoresTheCurrentCue() {
+        RecordingBackend backend = new RecordingBackend();
+        LyricsPlaybackController lyrics = new LyricsPlaybackController(
+                Logger.getLogger("test"),
+                songId -> java.util.concurrent.CompletableFuture.completedFuture(List.of(
+                        new TimedLyric(Duration.ofSeconds(10), "Current lyric"),
+                        new TimedLyric(Duration.ofSeconds(30), "Later lyric"))));
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), backend, "0.1.0", "26.2", "test", lyrics);
+        List<String> events = new ArrayList<>();
+        controller.setOnLyric(text -> events.add("show:" + text));
+        controller.setOnLyricClear(() -> events.add("clear"));
+        KaraokeTrack apiTrack = new KaraokeTrack(
+                "23b51bed-6827-4556-a427-de75940bfcdf",
+                TrackType.SONG,
+                "Title",
+                "Artist",
+                new AudioAsset("https://audio/s1.opus", AudioFormat.OPUS),
+                null,
+                Duration.ofMinutes(2));
+
+        controller.handleAudioPayload(codec.encode(new AudioCommandPacket(
+                AudioCommandType.PLAY,
+                "global",
+                "lyrics-playback",
+                apiTrack,
+                PlaybackTarget.allPlayers(),
+                Duration.ZERO,
+                Instant.EPOCH,
+                "",
+                Duration.ZERO)));
+        backend.playbackPosition = Duration.ofSeconds(15);
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.ENABLE)));
+        controller.tickLyrics();
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.DISABLE)));
+        controller.handleAudioPayload(codec.encode(lyricsPacket(LyricsDisplayAction.ENABLE)));
+        controller.tickLyrics();
+
+        assertEquals(List.of("show:Current lyric", "clear", "show:Current lyric"), events);
+    }
+
+    @Test
+    void unknownLyricsActionDoesNotChangeOrPersistState() {
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), new RecordingBackend(), "0.1.0", "26.2", "test");
+        List<Boolean> changes = new ArrayList<>();
+        controller.setOnLyricsToggled(changes::add);
+        AudioCommandPacket unknown = new AudioCommandPacket(
+                AudioCommandType.LYRICS,
+                "global",
+                "p1",
+                null,
+                null,
+                Duration.ZERO,
+                Instant.EPOCH,
+                "lyrics-future-mode",
+                Duration.ZERO);
+
+        controller.handleAudioPayload(codec.encode(unknown));
+
+        assertFalse(controller.lyricsEnabled());
+        assertEquals(List.of(), changes);
+    }
+
+    @Test
+    void persistedLyricsPreferenceCanInitializeTheController() {
+        ClientAudioController controller = new ClientAudioController(
+                Logger.getLogger("test"), new RecordingBackend(), "0.1.0", "26.2", "test");
+
+        controller.setLyricsEnabled(true);
+
+        assertTrue(controller.lyricsEnabled());
+    }
+
     private ClientStatusPacket status(ClientAudioController controller) {
         return assertInstanceOf(ClientStatusPacket.class, codec.decode(controller.statusPayload()));
     }
@@ -401,6 +590,7 @@ class ClientAudioControllerTest {
         private float lastGameVolume = 1.0f;
         private AudioBackendStatus status = AudioBackendStatus.ready();
         private InputStream serverStream;
+        private Duration playbackPosition;
 
         @Override
         public void play(AudioCommandPacket packet) {
@@ -442,6 +632,11 @@ class ClientAudioControllerTest {
         public void setGameVolume(float linearGain) {
             calls.add("game-volume");
             lastGameVolume = linearGain;
+        }
+
+        @Override
+        public Optional<Duration> playbackPosition() {
+            return Optional.ofNullable(playbackPosition);
         }
 
         @Override

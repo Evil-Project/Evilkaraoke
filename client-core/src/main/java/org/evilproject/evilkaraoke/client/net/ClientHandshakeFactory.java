@@ -18,6 +18,7 @@ public final class ClientHandshakeFactory {
                 List.of("opus", "ogg", "mp3", "stream"),
                 true,
                 false,
+                true,
                 true
         );
     }

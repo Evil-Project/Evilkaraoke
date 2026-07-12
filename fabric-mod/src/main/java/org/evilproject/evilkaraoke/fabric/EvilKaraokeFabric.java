@@ -229,6 +229,7 @@ public final class EvilKaraokeFabric implements ModInitializer {
         }
         if (lower.startsWith("evilkaraoke ")
                 || lower.startsWith("queue ")
+                || lower.startsWith("random songs")
                 || lower.startsWith("results for")
                 || lower.startsWith("setlists")
                 || lower.startsWith("public playlists")
