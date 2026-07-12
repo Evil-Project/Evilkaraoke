@@ -28,13 +28,13 @@ A Minecraft karaoke system for Paper, Fabric, and NeoForge servers with Fabric a
 ./gradlew build
 
 # Paper server: copy plugin to your Paper server
-cp paper-plugin/build/libs/Evilkaraoke-Paper-1.0.1.jar /path/to/server/plugins/
+cp paper-plugin/build/libs/Evilkaraoke-Paper-1.0.2.jar /path/to/server/plugins/
 
 # Fabric server or Fabric client: copy the same Fabric mod jar to mods/
-cp fabric-mod/build/libs/Evilkaraoke-Fabric-1.0.1.jar ~/.minecraft/mods/
+cp fabric-mod/build/libs/Evilkaraoke-Fabric-1.0.2.jar ~/.minecraft/mods/
 
 # NeoForge server or NeoForge client: copy the same NeoForge mod jar to mods/
-cp neoforge-mod/build/libs/Evilkaraoke-NeoForge-1.0.1.jar ~/.minecraft/mods/
+cp neoforge-mod/build/libs/Evilkaraoke-NeoForge-1.0.2.jar ~/.minecraft/mods/
 ```
 
 Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and NeoForge generate `config/evilkaraoke/evilkaraoke.json`. Edit the API endpoints, then run `/ek reload`.
@@ -56,7 +56,7 @@ Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and N
 ### Server (Paper)
 
 1. Download Paper 26.2+ from [papermc.io](https://papermc.io/downloads/paper)
-2. Place `Evilkaraoke-Paper-1.0.1.jar` in your `plugins/` directory
+2. Place `Evilkaraoke-Paper-1.0.2.jar` in your `plugins/` directory
 3. Start the server — `config.yml` and `messages.yml` are generated in `plugins/Evilkaraoke/`
 4. Configure your Neurokaraoke API endpoints in `config.yml` (see [Configuration](#configuration))
 5. Reload the plugin: `/ek reload`
@@ -64,23 +64,23 @@ Start the server. Paper generates `plugins/Evilkaraoke/config.yml`; Fabric and N
 ### Client (Fabric)
 
 1. Install Fabric Loader 0.19.3+ for Minecraft 26.2
-2. Place `Evilkaraoke-Fabric-1.0.1.jar` in your `mods/` directory
+2. Place `Evilkaraoke-Fabric-1.0.2.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running the Evilkaraoke Paper plugin or Fabric server mod
 4. Timed lyrics are disabled by default; enable them with `/ek lyrics enable`
 
 ### Server (Fabric)
 
 1. Install Fabric Loader 0.19.3+ for Minecraft 26.2 on the server
-2. Place the same `Evilkaraoke-Fabric-1.0.1.jar` in the server `mods/` directory
+2. Place the same `Evilkaraoke-Fabric-1.0.2.jar` in the server `mods/` directory
 3. Start the server and configure `config/evilkaraoke/evilkaraoke.json`
 4. Optional: install LuckPerms Fabric to manage `evilkaraoke.*` permissions
 
-The Fabric jar is both the server mod and the client audio mod. On a Paper server, install `Evilkaraoke-Paper-1.0.1.jar` on the server and install the Fabric jar only on players' clients.
+The Fabric jar is both the server mod and the client audio mod. On a Paper server, install `Evilkaraoke-Paper-1.0.2.jar` on the server and install the Fabric jar only on players' clients.
 
 ### Client (NeoForge)
 
 1. Install NeoForge 26.2.0.7-beta+ for Minecraft 26.2
-2. Place `Evilkaraoke-NeoForge-1.0.1.jar` in your `mods/` directory
+2. Place `Evilkaraoke-NeoForge-1.0.2.jar` in your `mods/` directory
 3. Launch Minecraft and join a server running Evilkaraoke
 4. Timed lyrics are disabled by default; enable them with `/ek lyrics enable`
 
@@ -288,9 +288,9 @@ The command prefix and common permission, player-only, unknown-command, and clie
 ```
 
 Artifacts:
-- `paper-plugin/build/libs/Evilkaraoke-Paper-1.0.1.jar`
-- `fabric-mod/build/libs/Evilkaraoke-Fabric-1.0.1.jar`
-- `neoforge-mod/build/libs/Evilkaraoke-NeoForge-1.0.1.jar`
+- `paper-plugin/build/libs/Evilkaraoke-Paper-1.0.2.jar`
+- `fabric-mod/build/libs/Evilkaraoke-Fabric-1.0.2.jar`
+- `neoforge-mod/build/libs/Evilkaraoke-NeoForge-1.0.2.jar`
 
 ## Development
 
